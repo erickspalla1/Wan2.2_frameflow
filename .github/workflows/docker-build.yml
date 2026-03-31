@@ -25,4 +25,5 @@ jobs:
           context: frameflow-engine/
           file: frameflow-engine/Dockerfile
           push: true
+          no-cache: true
           tags: spalla1/frameflow-engine:latest
