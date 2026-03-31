@@ -18,15 +18,13 @@ RUN git clone https://github.com/comfyanonymous/ComfyUI.git /app/comfyui
 WORKDIR /app/comfyui
 RUN pip3 install --no-cache-dir -r requirements.txt
 
-# Install custom nodes
-RUN cd /app/comfyui/custom_nodes && \
-    git clone https://github.com/Fannovel16/comfyui_controlnet_aux.git && \
-    git clone https://github.com/cubiq/ComfyUI_IPAdapter_plus.git && \
-    git clone https://github.com/kijai/ComfyUI-WanVideoWrapper.git && \
-    git clone https://github.com/Jonseed/ComfyUI-Image-Filters.git && \
-    git clone https://github.com/EllangoK/ComfyUI-post-processing-nodes.git && \
-    git clone https://github.com/WASasquatch/was-node-suite-comfyui.git && \
-    git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git
+# Install custom nodes (one per RUN to isolate failures)
+RUN cd /app/comfyui/custom_nodes && git clone https://github.com/Fannovel16/comfyui_controlnet_aux.git || true
+RUN cd /app/comfyui/custom_nodes && git clone https://github.com/cubiq/ComfyUI_IPAdapter_plus.git || true
+RUN cd /app/comfyui/custom_nodes && git clone https://github.com/kijai/ComfyUI-WanVideoWrapper.git || true
+RUN cd /app/comfyui/custom_nodes && git clone https://github.com/Jonseed/ComfyUI-Image-Filters.git || true
+RUN cd /app/comfyui/custom_nodes && git clone https://github.com/EllangoK/ComfyUI-post-processing-nodes.git || true
+RUN cd /app/comfyui/custom_nodes && git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git || true
 
 # Install node dependencies
 RUN cd /app/comfyui/custom_nodes/comfyui_controlnet_aux && pip3 install --no-cache-dir -r requirements.txt || true
@@ -34,7 +32,6 @@ RUN cd /app/comfyui/custom_nodes/ComfyUI_IPAdapter_plus && pip3 install --no-cac
 RUN cd /app/comfyui/custom_nodes/ComfyUI-WanVideoWrapper && pip3 install --no-cache-dir -r requirements.txt || true
 RUN cd /app/comfyui/custom_nodes/ComfyUI-Image-Filters && pip3 install --no-cache-dir -r requirements.txt || true
 RUN cd /app/comfyui/custom_nodes/ComfyUI-post-processing-nodes && pip3 install --no-cache-dir -r requirements.txt || true
-RUN cd /app/comfyui/custom_nodes/was-node-suite-comfyui && pip3 install --no-cache-dir -r requirements.txt || true
 RUN cd /app/comfyui/custom_nodes/ComfyUI-VideoHelperSuite && pip3 install --no-cache-dir -r requirements.txt || true
 
 # Install RunPod SDK
