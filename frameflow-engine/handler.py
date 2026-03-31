@@ -5,10 +5,12 @@ Processes video generation requests using ComfyUI + Wan 2.2 I2V A14B
 
 import runpod
 import json
+import copy
 import time
 import base64
 import requests
 import os
+import random
 import urllib.request
 
 COMFYUI_URL = "http://127.0.0.1:8188"
@@ -93,18 +95,51 @@ def get_output_video(outputs):
 
 def build_i2v_workflow(params):
     """
-    Build a ComfyUI workflow JSON for Wan 2.2 I2V generation.
-    This is a simplified version - the actual workflow JSON will be more complex
-    and loaded from /app/workflows/wan22_i2v.json with parameter substitution.
+    Load the ComfyUI workflow JSON and substitute dynamic parameters.
+
+    Node mapping:
+      97      - LoadImage (first frame)
+      116:93  - CLIP Text Encode (positive prompt)
+      116:89  - CLIP Text Encode (negative prompt)
+      116:98  - WanImageToVideo (width, height, length)
+      116:86  - KSamplerAdvanced high noise (seed, steps)
+      116:85  - KSamplerAdvanced low noise (steps)
     """
     workflow_path = "/app/workflows/wan22_i2v.json"
 
     with open(workflow_path, "r") as f:
         workflow = json.load(f)
 
-    # Substitute parameters into the workflow
-    # The exact node IDs depend on the exported ComfyUI workflow
-    # These will be mapped when we create the actual workflow file
+    workflow = copy.deepcopy(workflow)
+
+    # Seed: -1 means random
+    seed = params["seed"]
+    if seed < 0:
+        seed = random.randint(0, 2**53)
+
+    # Node 97: first frame image filename
+    workflow["97"]["inputs"]["image"] = params["first_frame_filename"]
+
+    # Node 116:93: positive prompt
+    workflow["116:93"]["inputs"]["text"] = params["prompt"]
+
+    # Node 116:89: negative prompt
+    workflow["116:89"]["inputs"]["text"] = params["negative_prompt"]
+
+    # Node 116:98: resolution and frame count
+    workflow["116:98"]["inputs"]["width"] = params["width"]
+    workflow["116:98"]["inputs"]["height"] = params["height"]
+    workflow["116:98"]["inputs"]["length"] = params["num_frames"]
+
+    # Node 116:86: high noise sampler - seed and steps
+    workflow["116:86"]["inputs"]["noise_seed"] = seed
+    workflow["116:86"]["inputs"]["steps"] = params["steps"]
+    # end_at_step = steps // 2 (first half uses high noise model)
+    workflow["116:86"]["inputs"]["end_at_step"] = params["steps"] // 2
+
+    # Node 116:85: low noise sampler - steps (continues from where high noise stopped)
+    workflow["116:85"]["inputs"]["steps"] = params["steps"]
+    workflow["116:85"]["inputs"]["start_at_step"] = params["steps"] // 2
 
     return workflow
 
