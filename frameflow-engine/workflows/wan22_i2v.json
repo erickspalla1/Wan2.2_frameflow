@@ -1,0 +1,4 @@
+{
+    "_comment": "Placeholder - real workflow will be exported from ComfyUI interface",
+    "_instructions": "1. Open ComfyUI on a RunPod Pod, 2. Build the Wan 2.2 I2V workflow with ControlNet, 3. Export as API JSON, 4. Replace this file"
+}
