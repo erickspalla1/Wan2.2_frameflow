@@ -120,6 +120,12 @@ hf_hub_download(
     filename='RealESRGAN_x4.pth',
     local_dir='$UPSCALE_DIR'
 )
+# Rename to match ComfyUI's expected filename
+import os, shutil
+src = os.path.join('$UPSCALE_DIR', 'RealESRGAN_x4.pth')
+dst = os.path.join('$UPSCALE_DIR', 'RealESRGAN_x4plus.pth')
+if os.path.exists(src) and not os.path.exists(dst):
+    shutil.copy2(src, dst)
 print('Upscale model downloaded.')
 "
 else
@@ -141,7 +147,7 @@ mkdir -p /app/comfyui/models/diffusion_models
 ln -sf $MODEL_DIR /app/comfyui/models/wan22
 ln -sf $CONTROLNET_DIR /app/comfyui/models/controlnet_custom
 ln -sf $IPADAPTER_DIR /app/comfyui/models/ipadapter_custom
-ln -sf $UPSCALE_DIR /app/comfyui/models/upscale_custom
+ln -sf $UPSCALE_DIR/*.pth /app/comfyui/models/upscale_models/ 2>/dev/null || true
 
 # Symlink Fun Control diffusion models into ComfyUI's diffusion_models folder
 if [ -d "$FUN_CONTROL_DIR/split_files/diffusion_models" ]; then

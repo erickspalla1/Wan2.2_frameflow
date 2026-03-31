@@ -1,0 +1,31 @@
+{
+  "14": {
+    "inputs": {
+      "preset": "Composition"
+    },
+    "class_type": "IPAdapterUnifiedLoaderCommunity",
+    "_meta": {
+      "title": "IPAdapter Unified Loader Community"
+    }
+  },
+  "15": {
+    "inputs": {
+      "weight": 1,
+      "start_at": 0,
+      "end_at": 1,
+      "weight_type": "standard",
+      "model": [
+        "14",
+        0
+      ],
+      "ipadapter": [
+        "14",
+        1
+      ]
+    },
+    "class_type": "IPAdapter",
+    "_meta": {
+      "title": "IPAdapter"
+    }
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "20": {
+    "inputs": {},
+    "class_type": "UpscaleModelLoader",
+    "_meta": {
+      "title": "Load Upscale Model"
+    }
+  },
+  "21": {
+    "inputs": {
+      "upscale_model": [
+        "20",
+        0
+      ]
+    },
+    "class_type": "ImageUpscaleWithModel",
+    "_meta": {
+      "title": "Upscale Image (using Model)"
+    }
+  }
+}

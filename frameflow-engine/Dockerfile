@@ -34,8 +34,8 @@ RUN cd /app/comfyui/custom_nodes/ComfyUI-Image-Filters && pip3 install --no-cach
 RUN cd /app/comfyui/custom_nodes/ComfyUI-post-processing-nodes && pip3 install --no-cache-dir -r requirements.txt || true
 RUN cd /app/comfyui/custom_nodes/ComfyUI-VideoHelperSuite && pip3 install --no-cache-dir -r requirements.txt || true
 
-# Install RunPod SDK
-RUN pip3 install --no-cache-dir runpod requests
+# Install RunPod SDK + video creation for control video generation
+RUN pip3 install --no-cache-dir runpod requests "imageio[ffmpeg]"
 
 # Copy handler and workflow files
 WORKDIR /app

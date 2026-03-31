@@ -1,0 +1,63 @@
+{
+  "10": {
+    "inputs": {
+      "intensity": 0.2,
+      "scale": 10,
+      "temperature": 0,
+      "vignette": 0
+    },
+    "class_type": "FilmGrain",
+    "_meta": {
+      "title": "FilmGrain"
+    }
+  },
+  "11": {
+    "inputs": {
+      "red_shift": 0,
+      "red_direction": "horizontal",
+      "green_shift": 0,
+      "green_direction": "horizontal",
+      "blue_shift": 0,
+      "blue_direction": "horizontal",
+      "image": [
+        "10",
+        0
+      ]
+    },
+    "class_type": "ChromaticAberration",
+    "_meta": {
+      "title": "ChromaticAberration"
+    }
+  },
+  "12": {
+    "inputs": {
+      "vignette": 0,
+      "image": [
+        "11",
+        0
+      ]
+    },
+    "class_type": "Vignette",
+    "_meta": {
+      "title": "Vignette"
+    }
+  },
+  "13": {
+    "inputs": {
+      "temperature": 0,
+      "hue": 0,
+      "brightness": 0,
+      "contrast": 0,
+      "saturation": 0,
+      "gamma": 1,
+      "image": [
+        "12",
+        0
+      ]
+    },
+    "class_type": "ColorCorrect",
+    "_meta": {
+      "title": "ColorCorrect"
+    }
+  }
+}
