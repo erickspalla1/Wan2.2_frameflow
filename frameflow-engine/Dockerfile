@@ -15,6 +15,9 @@ RUN apt-get update && apt-get install -y \
 # Create working directory
 WORKDIR /app
 
+# Install PyTorch with CUDA 12.1 support
+RUN pip3 install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+
 # Install ComfyUI
 RUN git clone https://github.com/comfyanonymous/ComfyUI.git /app/comfyui
 WORKDIR /app/comfyui
