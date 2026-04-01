@@ -1,13 +1,25 @@
 #!/bin/bash
-set -e
+# NOTE: no 'set -e' — we handle errors per-step to avoid crash loops
 
 echo "=== FrameFlow Engine Starting ==="
+echo "Date: $(date)"
+echo "Hostname: $(hostname)"
+echo "GPU: $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null || echo 'no GPU detected')"
 
-# Persist HuggingFace cache on network volume (survives cold starts)
+# Check if network volume is mounted
+if [ -d "/runpod-volume" ]; then
+    echo "Network volume mounted at /runpod-volume"
+    df -h /runpod-volume 2>/dev/null || true
+else
+    echo "WARNING: /runpod-volume not found — models will download to container (lost on restart)"
+    mkdir -p /runpod-volume
+fi
+
+# Persist HuggingFace cache on network volume
 export HF_HOME="/runpod-volume/huggingface_cache"
-mkdir -p "$HF_HOME"
+mkdir -p "$HF_HOME" 2>/dev/null || true
 
-pip3 install --no-cache-dir huggingface_hub 2>/dev/null || true
+pip3 install --no-cache-dir huggingface_hub 2>/dev/null || echo "WARNING: huggingface_hub install failed"
 
 # ══════════════════════════════════════════════════════════════
 # All Wan 2.2 models from Comfy-Org repackaged
@@ -21,15 +33,18 @@ download_model() {
     local file="$2"
     local dest="$3"
     if [ ! -f "$dest" ]; then
-        echo "  Downloading $(basename $dest)..."
+        echo "  Downloading $(basename $dest) from $repo..."
         python3 -c "
 from huggingface_hub import hf_hub_download
 import shutil, os
-path = hf_hub_download(repo_id='$repo', filename='$file')
-os.makedirs(os.path.dirname('$dest'), exist_ok=True)
-shutil.copy2(path, '$dest')
-print('  OK: $(basename $dest)')
-"
+try:
+    path = hf_hub_download(repo_id='$repo', filename='$file')
+    os.makedirs(os.path.dirname('$dest'), exist_ok=True)
+    shutil.copy2(path, '$dest')
+    print('  OK: $(basename $dest)')
+except Exception as e:
+    print(f'  ERROR downloading $(basename $dest): {e}')
+" || echo "  WARNING: Failed to download $(basename $dest) — continuing"
     else
         echo "  Found: $(basename $dest)"
     fi
@@ -152,23 +167,46 @@ echo "Model symlinks ready."
 # ══════════════════════════════════════════════════════════════
 # Start ComfyUI + RunPod handler
 # ══════════════════════════════════════════════════════════════
-echo "Starting ComfyUI server..."
+echo ""
+echo "=== Starting ComfyUI server ==="
 cd /app/comfyui
 python3 main.py --listen 127.0.0.1 --port 8188 --dont-print-server &
+COMFY_PID=$!
+echo "ComfyUI PID: $COMFY_PID"
 
 echo "Waiting for ComfyUI to start..."
+COMFY_READY=false
 for i in $(seq 1 90); do
-    if curl -s http://127.0.0.1:8188/system_stats > /dev/null 2>&1; then
-        echo "ComfyUI is ready! (took ~${i}x2 seconds)"
+    # Check if ComfyUI process is still alive
+    if ! kill -0 $COMFY_PID 2>/dev/null; then
+        echo "ERROR: ComfyUI process died (PID $COMFY_PID)"
+        echo "Attempting to see last error..."
+        wait $COMFY_PID 2>/dev/null
+        echo "Exit code: $?"
         break
     fi
-    if [ "$i" -eq 90 ]; then
-        echo "ERROR: ComfyUI failed to start after 180 seconds"
-        exit 1
+
+    if curl -s http://127.0.0.1:8188/system_stats > /dev/null 2>&1; then
+        echo "ComfyUI is ready! (took ~$((i*2)) seconds)"
+        COMFY_READY=true
+        break
     fi
     sleep 2
 done
 
-echo "Starting RunPod handler..."
+if [ "$COMFY_READY" = false ]; then
+    echo "ERROR: ComfyUI failed to start"
+    echo "Listing installed custom nodes:"
+    ls -la /app/comfyui/custom_nodes/ 2>/dev/null || true
+    echo "Listing models:"
+    ls -la /app/comfyui/models/diffusion_models/ 2>/dev/null || true
+    ls -la /app/comfyui/models/text_encoders/ 2>/dev/null || true
+    ls -la /app/comfyui/models/vae/ 2>/dev/null || true
+    # Don't exit — still start the handler so RunPod can return error messages
+    echo "WARNING: Starting handler anyway — jobs will fail with 'ComfyUI not ready'"
+fi
+
+echo ""
+echo "=== Starting RunPod handler ==="
 cd /app
-python3 -u handler.py
+exec python3 -u handler.py
