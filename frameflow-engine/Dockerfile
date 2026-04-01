@@ -3,10 +3,12 @@ FROM nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 
-# System dependencies
+# System dependencies (build-essential needed for compiling custom node C extensions)
 RUN apt-get update && apt-get install -y \
     python3 python3-pip python3-venv \
     git wget curl \
+    build-essential \
+    ffmpeg \
     libgl1-mesa-glx libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
@@ -34,8 +36,8 @@ RUN cd /app/comfyui/custom_nodes/ComfyUI-Image-Filters && pip3 install --no-cach
 RUN cd /app/comfyui/custom_nodes/ComfyUI-post-processing-nodes && pip3 install --no-cache-dir -r requirements.txt || true
 RUN cd /app/comfyui/custom_nodes/ComfyUI-VideoHelperSuite && pip3 install --no-cache-dir -r requirements.txt || true
 
-# Install RunPod SDK + video creation for control video generation
-RUN pip3 install --no-cache-dir runpod requests "imageio[ffmpeg]"
+# Install RunPod SDK + video/image processing
+RUN pip3 install --no-cache-dir runpod requests "imageio[ffmpeg]" Pillow numpy
 
 # Copy handler and workflow files
 WORKDIR /app
