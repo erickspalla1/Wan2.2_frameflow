@@ -390,15 +390,104 @@ download_model "convir" "convir_gopro.pkl" "$DEBLUR_DIR/convir_gopro.pkl"
 
 ---
 
+## Fase 7: Testes de Motion Reference (vídeo real como guia)
+
+### Contexto
+
+O handler já aceita `control_video_url` — um vídeo de referência que o Fun Control usa pra replicar o padrão de movimento. Até agora só geramos depth maps estáticos. Mas o Fun Control aceita **qualquer vídeo** como controle — incluindo filmagens reais.
+
+Isso é a melhor abordagem pra:
+- **Movimento humano natural** — filmar pessoa caminhando com celular, usar como control_video
+- **Física de líquido real** — filmar despejo de água/honey, usar como referência
+- **Rotação de produto** — filmar produto girando em turntable
+
+### Teste 7.1 — Vídeo real de pessoa como control
+
+**Setup:** Filmar 5s de uma pessoa caminhando (celular, 720p, 16fps ou 30fps)
+
+**Workflow:**
+```
+LoadVideo (vídeo real filmado) → GetVideoComponents → Wan22FunControlToVideo
+LoadImage (first frame gerado/desejado) → ref_image
+```
+
+**Verificar:**
+- [ ] Fun Control replica o padrão de caminhada do vídeo real?
+- [ ] Pessoa gerada mantém identidade do first frame?
+- [ ] Movimento é natural? Pés no chão? Braços coerentes?
+- [ ] Comparar: control_video real vs depth map estático → qual é melhor?
+
+### Teste 7.2 — Vídeo real de líquido como control
+
+**Setup:** Filmar 5s de café sendo despejado numa xícara (celular)
+
+**Verificar:**
+- [ ] Fun Control replica a dinâmica de fluido do vídeo real?
+- [ ] O líquido gerado segue a mesma trajetória e timing?
+- [ ] Comparar com geração puramente via prompt (sem control_video)
+
+### Teste 7.3 — Turntable de produto como control
+
+**Setup:** Filmar produto girando 360° em turntable
+
+**Verificar:**
+- [ ] Fun Control replica velocidade e ângulo de rotação?
+- [ ] Produto mantém identidade visual (logos, detalhes)?
+- [ ] Melhor que depth map estático pra rotação?
+
+### Teste 7.4 — OpenPose como control type pra humano
+
+**Setup:** Usar OpenPose preprocessor em vídeo de referência humano → gerar pose video → usar como control
+
+```
+LoadVideo (pessoa caminhando) → OpenPose Preprocessor (frame a frame) → Save como video
+→ usar como control_video no Fun Control
+```
+
+**Verificar:**
+- [ ] OpenPose gera skeleton video consistente frame a frame?
+- [ ] Fun Control com pose video produz movimento mais preciso que com depth video?
+- [ ] Articulações ficam corretas? Joelhos, cotovelos, pulsos?
+
+### Implicação pra produto
+
+Se testes 7.1-7.4 funcionarem bem, o FrameFlow pode oferecer:
+1. **Biblioteca de motion references** — vídeos pré-gravados de movimentos comuns
+2. **Upload de vídeo de referência pelo user** — "gere meu produto se movendo como nesse vídeo"
+3. **OpenPose como control type** pra humanos (já temos o preprocessor no handler)
+
+---
+
+## Fase 8: HuMo — Decisão Final
+
+**Status: NÃO INTEGRAR.**
+
+Pesquisa detalhada concluiu que HuMo:
+- É modelo separado (~40-80GB VRAM), não roda junto com Wan 2.2
+- Não exporta dados de movimento/pose pra alimentar Fun Control
+- 3-6 min pra 2s de vídeo — incompatível com serverless
+- ComfyUI integration imatura, sem workflows combinados
+- Limitado a ~4s de vídeo com qualidade
+
+**Abordagem alternativa escolhida:**
+- Smart prompts biomecânicos (IMPLEMENTADO no handler.py)
+- Fun Control com vídeo de referência real (testar na Fase 7)
+- RIFE frame interpolation 16→24fps (testar na Fase 2)
+- Overcapture mode pra gerar slow-motion e selecionar melhor segmento (IMPLEMENTADO)
+
+---
+
 ## Decisões Pendentes (dependem dos testes)
 
 | Decisão | Depende de |
 |---|---|
 | IP Adapter fica ou sai? | Teste 2.4 — se crashar com Wan 2.2, remover |
 | RIFE vai no preset "product"? | Performance — se < 10s, sim |
-| FaceRestore vai como default? | Qualidade — se melhorar sem artefatos, sim pra personagens |
-| Deblur vai como default pra produto? | Qualidade — se melhorar rotação, sim |
-| Blend depth+canny funciona? | Teste 2.5 — se pior que depth puro, voltar pra depth |
+| FaceRestore vai como default pra personagem? | Qualidade — se melhorar sem artefatos |
+| Deblur vai como default pra produto? | Qualidade — se melhorar rotação |
+| Blend depth+canny funciona? | Teste 2.5 — se pior que depth puro, voltar |
+| Vídeo real como control > depth estático? | Teste 7.1-7.3 — comparar lado a lado |
+| OpenPose control pra humano? | Teste 7.4 — se articulações ficarem corretas |
 | Ordem da cadeia de pós-processamento | Teste 3.2 — medir diferentes ordens |
 
 ---
@@ -406,6 +495,6 @@ download_model "convir" "convir_gopro.pkl" "$DEBLUR_DIR/convir_gopro.pkl"
 ## Custos estimados do Pod
 
 - A100 80GB Pod: ~$1.50-2.00/hora no RunPod
-- Tempo estimado pra todos os testes: 3-5 horas
-- Custo total: ~$5-10
+- Tempo estimado pra todos os testes (incluindo Fase 7): 4-6 horas
+- Custo total: ~$8-12
 - **Depois dos testes: desligar o Pod.** Os modelos ficam no network volume.

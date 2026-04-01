@@ -115,44 +115,248 @@ UNIVERSAL_PRODUCT_NEGATIVES = (
 )
 
 
-def detect_product_type(prompt):
+# ══════════════════════════════════════════════════════════════
+# Human Content Detection + Biomechanics Prompts
+# ══════════════════════════════════════════════════════════════
+
+HUMAN_KEYWORDS = [
+    "person", "woman", "man", "girl", "boy", "child", "people", "model",
+    "dancer", "athlete", "actor", "character", "human", "body", "face",
+    "walk", "dance", "run", "jump", "wave", "sit", "stand", "gesture",
+    "pessoa", "mulher", "homem", "menina", "criança", "dançar", "andar",
+    "correr", "pular", "acenar",
+]
+
+HUMAN_PROMPT_BOOST = (
+    "Smooth continuous natural human motion, feet firmly planted on ground, "
+    "natural weight distribution shifting with movement, "
+    "proper joint articulation, anatomically correct body proportions."
+)
+
+HUMAN_NEGATIVES = (
+    "floating feet, feet sliding on ground, jittery limbs, jerky movement, "
+    "wrong joint bending, disconnected body parts, unnatural pose transitions, "
+    "rubber limbs, extra fingers, extra limbs, missing limbs, "
+    "contorted body, impossible anatomy, limbs phasing through body, "
+    "stuttering motion, teleporting body parts, frozen pose with moving camera"
+)
+
+# ══════════════════════════════════════════════════════════════
+# Liquid Content Detection + Viscosity-Aware Prompts
+# ══════════════════════════════════════════════════════════════
+
+LIQUID_TYPES = {
+    "water": {
+        "keywords": ["water", "splash", "rain", "waterfall", "wave", "ocean",
+                     "pool", "shower", "fountain", "água", "chuva"],
+        "prompt_boost": (
+            "Rapid fluid dynamics, realistic water physics, "
+            "splashing impact with droplets, surface tension ripples, "
+            "clear transparent liquid, natural gravity on water."
+        ),
+        "negatives": (
+            "viscous water, sticky water, slow pour water, honey-like water, "
+            "frozen liquid, solid water, water morphing into solid"
+        ),
+        "cfg_override": 2.0,
+    },
+    "honey": {
+        "keywords": ["honey", "syrup", "caramel", "molasses", "mel", "calda"],
+        "prompt_boost": (
+            "Thick viscous flow, slow heavy drip, golden translucency, "
+            "surface tension forming strands, syrupy resistance against gravity, "
+            "warm backlight highlighting translucent liquid."
+        ),
+        "negatives": (
+            "watery honey, splashing honey, fast flowing honey, thin liquid, "
+            "honey breaking apart, liquid teleporting"
+        ),
+        "cfg_override": 2.5,
+    },
+    "wine": {
+        "keywords": ["wine", "champagne", "cocktail", "pour", "glass",
+                     "vinho", "champanhe", "coquetel"],
+        "prompt_boost": (
+            "Smooth elegant liquid pour, meniscus visible on glass surface, "
+            "controlled stream flow, liquid catching light, "
+            "natural gravity pulling liquid down."
+        ),
+        "negatives": (
+            "splashing wine, turbulent pour, thick viscous wine, "
+            "liquid floating upward, wine changing color, glass morphing"
+        ),
+        "cfg_override": 2.5,
+    },
+    "coffee": {
+        "keywords": ["coffee", "latte", "cream", "milk", "cappuccino",
+                     "café", "leite", "creme"],
+        "prompt_boost": (
+            "Creamy liquid swirl, milk blending slowly into darker liquid, "
+            "natural diffusion pattern, warm steam rising, "
+            "realistic fluid mixing dynamics."
+        ),
+        "negatives": (
+            "separated layers, chunky liquid, frozen swirl, "
+            "cream teleporting, coffee solidifying, unrealistic mixing"
+        ),
+        "cfg_override": 2.5,
+    },
+    "perfume": {
+        "keywords": ["perfume", "spray", "mist", "fragrance", "atomizer",
+                     "perfume bottle", "spritz"],
+        "prompt_boost": (
+            "Fine mist dispersal, delicate atomized particles catching light, "
+            "ethereal spray cloud, light refracting through micro-droplets."
+        ),
+        "negatives": (
+            "heavy liquid pour, thick spray, solid particles, "
+            "mist becoming solid, spray freezing mid-air"
+        ),
+        "cfg_override": 2.5,
+    },
+    "condensation": {
+        "keywords": ["condensation", "droplets", "dew", "frost", "cold surface",
+                     "moist", "humid", "sweat", "condensação", "orvalho", "gota"],
+        "prompt_boost": (
+            "Water droplets forming on cold surface, beading up naturally, "
+            "surface tension creating pearl-shaped drops, "
+            "slow gradual accumulation, droplets merging and sliding down."
+        ),
+        "negatives": (
+            "pouring liquid, streaming water, fast movement, "
+            "droplets appearing instantly, condensation teleporting"
+        ),
+        "cfg_override": 2.0,
+    },
+    "generic_liquid": {
+        "keywords": ["liquid", "fluid", "drip", "flow", "pour", "spill",
+                     "líquido", "fluido", "derramar", "gotejar"],
+        "prompt_boost": (
+            "Realistic fluid dynamics, natural gravity on liquid, "
+            "smooth flow with surface tension, liquid interacting naturally with surfaces."
+        ),
+        "negatives": (
+            "liquid defying gravity, frozen liquid, liquid morphing into solid, "
+            "unrealistic fluid behavior, liquid teleporting"
+        ),
+        "cfg_override": 2.5,
+    },
+}
+
+
+# ══════════════════════════════════════════════════════════════
+# Unified Content Detection
+# ══════════════════════════════════════════════════════════════
+
+def detect_content_types(prompt):
+    """Detect product type, human content, and liquid type from prompt.
+    Returns (product_type, product_config, has_human, liquid_type, liquid_config)."""
     prompt_lower = prompt.lower()
+
+    # Product detection
+    product_type, product_config = None, None
     for ptype, config in PRODUCT_TYPES.items():
         for keyword in config["keywords"]:
             if keyword in prompt_lower:
-                return ptype, config
-    return None, None
+                product_type, product_config = ptype, config
+                break
+        if product_type:
+            break
+
+    # Human detection
+    has_human = any(kw in prompt_lower for kw in HUMAN_KEYWORDS)
+
+    # Liquid detection (check specific types first, then generic)
+    liquid_type, liquid_config = None, None
+    for ltype, config in LIQUID_TYPES.items():
+        if ltype == "generic_liquid":
+            continue  # check last
+        for keyword in config["keywords"]:
+            if keyword in prompt_lower:
+                liquid_type, liquid_config = ltype, config
+                break
+        if liquid_type:
+            break
+    # Fallback to generic liquid
+    if not liquid_type:
+        for keyword in LIQUID_TYPES["generic_liquid"]["keywords"]:
+            if keyword in prompt_lower:
+                liquid_type = "generic_liquid"
+                liquid_config = LIQUID_TYPES["generic_liquid"]
+                break
+
+    return product_type, product_config, has_human, liquid_type, liquid_config
 
 
 def build_smart_negative(user_negative, prompt):
-    product_type, config = detect_product_type(prompt)
-    if not product_type:
-        return user_negative, None
-    enhanced = ", ".join([user_negative, config["negatives"], UNIVERSAL_PRODUCT_NEGATIVES])
-    log.info("Product type: %s — smart negatives injected", product_type)
-    return enhanced, product_type
+    """Build enhanced negative prompt based on all detected content types."""
+    product_type, product_config, has_human, liquid_type, liquid_config = detect_content_types(prompt)
+
+    parts = [user_negative]
+    detected = []
+
+    if product_type:
+        parts.append(product_config["negatives"])
+        parts.append(UNIVERSAL_PRODUCT_NEGATIVES)
+        detected.append(f"product:{product_type}")
+
+    if has_human:
+        parts.append(HUMAN_NEGATIVES)
+        detected.append("human")
+
+    if liquid_type:
+        parts.append(liquid_config["negatives"])
+        detected.append(f"liquid:{liquid_type}")
+
+    if not detected:
+        return user_negative, None, False, None
+
+    enhanced = ", ".join(parts)
+    log.info("Content detected: %s — smart negatives injected", " + ".join(detected))
+    return enhanced, product_type, has_human, liquid_type
 
 
 # ══════════════════════════════════════════════════════════════
 # Prompt Adapter for Wan 2.2
 # ══════════════════════════════════════════════════════════════
 
-def adapt_prompt_for_wan(prompt, product_type=None):
+def adapt_prompt_for_wan(prompt, product_type=None, has_human=False, liquid_type=None):
+    """Reformat prompt for optimal Wan 2.2 generation.
+    Injects context-specific motion and physics descriptions."""
+    prompt_lower = prompt.lower().strip()
+
+    # Don't modify already well-formatted prompts
     motion_starters = ["camera", "the subject", "a product", "smooth", "slow",
                        "the object", "rotating", "turning", "moving", "spinning"]
-    prompt_lower = prompt.lower().strip()
     already_formatted = any(prompt_lower.startswith(s) for s in motion_starters)
-    if already_formatted and len(prompt.split()) >= 15:
+    if already_formatted and len(prompt.split()) >= 20:
         return _add_quality_suffix(prompt)
 
+    # Ensure motion is described
     motion_words = ["rotate", "spin", "turn", "move", "pan", "dolly", "orbit",
                     "walk", "dance", "wave", "slide", "float", "fly", "zoom",
                     "slow", "smooth", "gentle", "static", "still",
-                    "gira", "roda", "dança"]
+                    "gira", "roda", "dança", "pour", "splash", "flow", "drip"]
     has_motion = any(w in prompt_lower for w in motion_words)
     if not has_motion:
-        prefix = "Smooth slow rotation showcasing the product." if product_type else "Smooth gentle motion."
-        prompt = f"{prefix} {prompt}"
+        if product_type:
+            prompt = f"Smooth slow rotation showcasing the product. {prompt}"
+        elif has_human:
+            prompt = f"Smooth natural movement. {prompt}"
+        else:
+            prompt = f"Smooth gentle motion. {prompt}"
+
+    # Inject human biomechanics boost
+    if has_human:
+        prompt = f"{prompt} {HUMAN_PROMPT_BOOST}"
+        log.info("Human content → biomechanics prompt injected")
+
+    # Inject liquid physics boost
+    if liquid_type and liquid_type in LIQUID_TYPES:
+        liquid_boost = LIQUID_TYPES[liquid_type]["prompt_boost"]
+        prompt = f"{prompt} {liquid_boost}"
+        log.info("Liquid '%s' → viscosity prompt injected", liquid_type)
+
     return _add_quality_suffix(prompt)
 
 
@@ -1196,10 +1400,10 @@ def process_single_job(job):
 
     prompt = job_input.get("prompt", "")
 
-    # ── Intelligence: Product detection ──
+    # ── Intelligence: Content detection (product + human + liquid) ──
     user_negative = job_input.get(
         "negative_prompt", "morphing, deforming, blurry, low quality, distorted")
-    enhanced_negative, product_type = build_smart_negative(user_negative, prompt)
+    enhanced_negative, product_type, has_human, liquid_type = build_smart_negative(user_negative, prompt)
 
     # ── Intelligence: Auto-mode ──
     requested_mode = job_input.get("mode", "auto")
@@ -1249,8 +1453,15 @@ def process_single_job(job):
         params["seed"] = derive_sequence_seed(seq_id, seq_idx, params["seed"])
         log.info("Sequence seed: %s[%d] → %d", seq_id[:8], seq_idx, params["seed"])
 
-    # ── Intelligence: Prompt adapter ──
-    params["prompt"] = adapt_prompt_for_wan(params["prompt"], product_type)
+    # ── Intelligence: Prompt adapter (product + human + liquid aware) ──
+    params["prompt"] = adapt_prompt_for_wan(params["prompt"], product_type, has_human, liquid_type)
+
+    # ── Intelligence: Liquid CFG override (liquid needs low CFG for natural physics) ──
+    if liquid_type and liquid_type in LIQUID_TYPES and not user_set_cfg:
+        liquid_cfg = LIQUID_TYPES[liquid_type].get("cfg_override")
+        if liquid_cfg:
+            params["cfg_scale"] = liquid_cfg
+            log.info("Liquid '%s' → cfg_scale override to %.1f", liquid_type, liquid_cfg)
 
     # ── Intelligence: Motion intensity ──
     meta = WORKFLOW_META.get(mode, {})
@@ -1272,10 +1483,15 @@ def process_single_job(job):
     if params.get("overcapture"):
         overcapture_meta = apply_overcapture(params, product_type)
 
-    log.info("Mode=%s | %dx%d | %d frames | product=%s | quality=%s | motion=%.1f | overcapture=%.1fx",
+    content_tags = [t for t in [
+        f"product:{product_type}" if product_type else None,
+        "human" if has_human else None,
+        f"liquid:{liquid_type}" if liquid_type else None,
+    ] if t]
+    log.info("Mode=%s | %dx%d | %d frames | content=[%s] | quality=%s | motion=%.1f | overcapture=%.1fx",
              mode, width, height, params["num_frames"],
-             product_type or "none", quality or "custom", params["motion_intensity"],
-             overcapture_meta["ratio"])
+             ", ".join(content_tags) or "generic", quality or "custom",
+             params["motion_intensity"], overcapture_meta["ratio"])
 
     try:
         if not wait_for_comfyui(timeout=30):
@@ -1385,7 +1601,11 @@ def process_single_job(job):
             "status": "COMPLETED",
             "mode": mode,
             "elapsed_seconds": round(elapsed, 1),
-            "product_type": product_type,
+            "content_detected": {
+                "product_type": product_type,
+                "has_human": has_human,
+                "liquid_type": liquid_type,
+            },
             "identity_score": identity_score,
             "auto_corrected": auto_corrected,
             "overcapture": {
