@@ -6,16 +6,27 @@ Three base pipelines:
   flf2v        Wan 2.2 First+Last Frame to Video (interpolation)
   fun_control  Wan 2.2 Fun Control (anti-morphing with depth/canny/pose)
 
-Modular injection layers:
+Intelligence layers (pre-generation):
+  Product detection     auto-detect product type → smart negatives
+  Prompt adapter        reformat prompt for Wan 2.2 optimal style
+  Auto-mode selection   choose best pipeline from inputs
+  Quality presets       "fast" / "balanced" / "cinematic" / "product" / "max"
+
+Modular injection layers (in-workflow):
   IP Adapter        visual identity from reference image
   Post-processing   film grain, chromatic aberration, vignette, color correct
   Upscale           RealESRGAN x4 to 4K
   Camera motion     prompt-based presets
+
+Post-generation:
+  Thumbnail           first frame extracted as small JPEG preview
+  Retry with fallback  fun_control failure → automatic i2v retry
 """
 
 import runpod
 import json
 import copy
+import re
 import time
 import base64
 import glob
@@ -30,7 +41,7 @@ import numpy as np
 from PIL import Image
 import imageio
 
-# ── Logging (#13) ─────────────────────────────────────────────
+# ── Logging ───────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -40,9 +51,297 @@ log = logging.getLogger("frameflow")
 
 COMFYUI_URL = "http://127.0.0.1:8188"
 COMFYUI_INPUT_DIR = "/app/comfyui/input"
+MAX_B64_RAW_BYTES = 10 * 1024 * 1024
 
-# Maximum base64 response size (bytes). RunPod limit ~20 MB.
-MAX_B64_RAW_BYTES = 10 * 1024 * 1024  # 10 MB raw → ~13 MB b64
+
+# ══════════════════════════════════════════════════════════════
+# INTELLIGENCE LAYER 1: Product Detection + Smart Negatives
+# ══════════════════════════════════════════════════════════════
+
+PRODUCT_TYPES = {
+    "footwear": {
+        "keywords": [
+            "shoe", "sneaker", "boot", "sandal", "slipper", "heel",
+            "loafer", "tennis", "tênis", "sapato", "bota",
+        ],
+        "negatives": (
+            "laces morphing, sole color changing, logo disappearing, "
+            "shoe shape deforming, stitching melting, tongue warping, "
+            "heel collapsing, rubber phasing"
+        ),
+    },
+    "bottle": {
+        "keywords": [
+            "bottle", "perfume", "fragrance", "wine", "drink", "beverage",
+            "garrafa", "frasco", "cosmetic bottle", "spray",
+        ],
+        "negatives": (
+            "label warping, liquid phasing through glass, cap deforming, "
+            "glass shape morphing, reflection shifting unnaturally, "
+            "liquid level changing, bottle bending"
+        ),
+    },
+    "electronics": {
+        "keywords": [
+            "phone", "laptop", "tablet", "watch", "headphone", "earbuds",
+            "speaker", "camera", "screen", "monitor", "celular", "relógio",
+        ],
+        "negatives": (
+            "screen content morphing, buttons disappearing, ports melting, "
+            "logo distorting, bezel warping, surface texture shifting, "
+            "display glitching unrealistically"
+        ),
+    },
+    "food": {
+        "keywords": [
+            "food", "cake", "burger", "pizza", "sushi", "chocolate",
+            "fruit", "coffee", "ice cream", "comida", "bolo",
+        ],
+        "negatives": (
+            "food melting unnaturally, toppings phasing, plate morphing, "
+            "ingredients fusing together, sauce disappearing, "
+            "garnish dissolving, texture becoming uniform"
+        ),
+    },
+    "apparel": {
+        "keywords": [
+            "shirt", "dress", "jacket", "pants", "jeans", "hoodie",
+            "suit", "coat", "skirt", "roupa", "camiseta", "vestido",
+        ],
+        "negatives": (
+            "fabric pattern morphing, print distorting, zipper melting, "
+            "collar deforming, button disappearing, seams shifting, "
+            "logo warping, fabric texture changing"
+        ),
+    },
+    "cosmetics": {
+        "keywords": [
+            "lipstick", "makeup", "foundation", "mascara", "blush",
+            "eyeshadow", "nail polish", "cream", "serum", "skincare",
+            "maquiagem", "batom",
+        ],
+        "negatives": (
+            "product shape deforming, label warping, cap morphing, "
+            "color shifting, applicator melting, tube bending unnaturally, "
+            "texture phasing, container collapsing"
+        ),
+    },
+    "jewelry": {
+        "keywords": [
+            "ring", "necklace", "bracelet", "earring", "pendant",
+            "gem", "diamond", "gold", "silver", "anel", "colar", "brinco",
+        ],
+        "negatives": (
+            "gem facets morphing, chain links fusing, metal texture shifting, "
+            "clasp disappearing, stone color drifting, setting deforming, "
+            "prongs melting"
+        ),
+    },
+    "bag": {
+        "keywords": [
+            "bag", "purse", "backpack", "handbag", "wallet", "clutch",
+            "tote", "bolsa", "mochila", "carteira",
+        ],
+        "negatives": (
+            "strap morphing, zipper disappearing, logo warping, "
+            "leather texture shifting, buckle melting, stitching dissolving, "
+            "handle deforming, pocket phasing"
+        ),
+    },
+}
+
+# Universal product negatives appended to ALL detected products
+UNIVERSAL_PRODUCT_NEGATIVES = (
+    "product changing shape, product morphing, logo disappearing, "
+    "text warping, color shifting unnaturally, material changing texture"
+)
+
+
+def detect_product_type(prompt):
+    """Detect product type from prompt text. Returns (type_name, config) or (None, None)."""
+    prompt_lower = prompt.lower()
+    for ptype, config in PRODUCT_TYPES.items():
+        for keyword in config["keywords"]:
+            if keyword in prompt_lower:
+                return ptype, config
+    return None, None
+
+
+def build_smart_negative(user_negative, prompt):
+    """Enhance negative prompt with product-specific anti-morphing terms."""
+    product_type, config = detect_product_type(prompt)
+
+    if not product_type:
+        return user_negative, None
+
+    parts = [user_negative]
+    parts.append(config["negatives"])
+    parts.append(UNIVERSAL_PRODUCT_NEGATIVES)
+
+    enhanced = ", ".join(parts)
+    log.info("Detected product type: %s — injected smart negatives", product_type)
+    return enhanced, product_type
+
+
+# ══════════════════════════════════════════════════════════════
+# INTELLIGENCE LAYER 2: Prompt Adapter for Wan 2.2
+# ══════════════════════════════════════════════════════════════
+
+def adapt_prompt_for_wan(prompt, product_type=None):
+    """Reformat prompt for optimal Wan 2.2 generation.
+
+    Wan 2.2 works best with:
+    - English technical descriptions
+    - Motion/action described explicitly upfront
+    - 40-100 words (not too short, not too long)
+    - Quality suffixes at the end
+    - Subject description before environment
+    """
+    # Don't modify if already looks well-formatted (starts with motion description)
+    motion_starters = [
+        "camera", "the subject", "a product", "smooth", "slow",
+        "the object", "rotating", "turning", "moving", "spinning",
+    ]
+    prompt_lower = prompt.lower().strip()
+    already_formatted = any(prompt_lower.startswith(s) for s in motion_starters)
+
+    if already_formatted and len(prompt.split()) >= 15:
+        return _add_quality_suffix(prompt)
+
+    # Ensure motion is described
+    has_motion = any(
+        word in prompt_lower
+        for word in [
+            "rotate", "spin", "turn", "move", "pan", "dolly", "orbit",
+            "walk", "dance", "wave", "slide", "float", "fly", "zoom",
+            "slow", "smooth", "gentle", "static", "still",
+            "gira", "roda", "move", "dança",
+        ]
+    )
+
+    if not has_motion:
+        if product_type:
+            prompt = f"Smooth slow rotation showcasing the product. {prompt}"
+        else:
+            prompt = f"Smooth gentle motion. {prompt}"
+        log.info("No motion detected — prepended default motion description")
+
+    return _add_quality_suffix(prompt)
+
+
+def _add_quality_suffix(prompt):
+    """Append quality boosters if not already present."""
+    quality_terms = ["high quality", "detailed", "sharp", "cinematic", "4k", "8k", "hd"]
+    has_quality = any(term in prompt.lower() for term in quality_terms)
+
+    if not has_quality:
+        prompt = f"{prompt} High quality, detailed, sharp focus."
+
+    # Trim to ~120 words max (Wan works poorly with very long prompts)
+    words = prompt.split()
+    if len(words) > 120:
+        prompt = " ".join(words[:120])
+        log.info("Prompt trimmed to 120 words")
+
+    return prompt
+
+
+# ══════════════════════════════════════════════════════════════
+# INTELLIGENCE LAYER 3: Auto-Mode Selection
+# ══════════════════════════════════════════════════════════════
+
+def auto_select_mode(job_input, product_type):
+    """Automatically select the best pipeline based on inputs.
+
+    Rules:
+    - last_frame_url provided → flf2v (interpolation)
+    - product detected in prompt → fun_control (anti-morphing)
+    - control_video_url provided → fun_control
+    - otherwise → i2v (fast)
+    """
+    has_last_frame = bool(job_input.get("last_frame_url"))
+    has_control_video = bool(job_input.get("control_video_url"))
+
+    if has_last_frame:
+        log.info("Auto-mode: flf2v (last_frame_url provided)")
+        return "flf2v"
+
+    if has_control_video:
+        log.info("Auto-mode: fun_control (control_video_url provided)")
+        return "fun_control"
+
+    if product_type:
+        log.info("Auto-mode: fun_control (product '%s' detected → anti-morphing)", product_type)
+        return "fun_control"
+
+    log.info("Auto-mode: i2v (default fast pipeline)")
+    return "i2v"
+
+
+# ══════════════════════════════════════════════════════════════
+# INTELLIGENCE LAYER 4: Quality Presets
+# ══════════════════════════════════════════════════════════════
+
+QUALITY_PRESETS = {
+    "fast": {
+        "mode": "i2v",
+        "steps": 4,       # LoRA-accelerated, ignored anyway
+        "cfg_scale": 1.0,  # LoRA-accelerated, ignored anyway
+        "description": "LightX2V 4-step LoRA — fastest generation (~30s)",
+    },
+    "balanced": {
+        "mode": "fun_control",
+        "steps": 20,
+        "cfg_scale": 3.5,
+        "control_type": "depth",
+        "description": "Fun Control depth anti-morphing at 20 steps (~2-3 min)",
+    },
+    "cinematic": {
+        "mode": "fun_control",
+        "steps": 25,
+        "cfg_scale": 4.0,
+        "control_type": "depth",
+        "film_grain_strength": 0.08,
+        "vignette_strength": 0.15,
+        "color_temperature": 3.0,
+        "description": "Cinematic look with film grain, vignette, warm tone (~3-4 min)",
+    },
+    "product": {
+        "mode": "fun_control",
+        "steps": 25,
+        "cfg_scale": 3.5,
+        "control_type": "depth",
+        "description": "Optimized for product videos — depth anti-morphing + smart negatives (~3-4 min)",
+    },
+    "max": {
+        "mode": "fun_control",
+        "steps": 30,
+        "cfg_scale": 4.0,
+        "control_type": "depth",
+        "upscale_4k": True,
+        "description": "Maximum quality — 30 steps + 4K upscale (~5-8 min)",
+    },
+}
+
+
+def apply_quality_preset(params, preset_name, job_input):
+    """Apply a quality preset, allowing user overrides for individual params."""
+    preset = QUALITY_PRESETS.get(preset_name)
+    if not preset:
+        return params
+
+    log.info("Applying quality preset: %s — %s", preset_name, preset["description"])
+
+    # Preset sets defaults; explicit user params override
+    for key, value in preset.items():
+        if key == "description":
+            continue
+        # Only apply if user didn't explicitly set this param
+        if key not in job_input or job_input.get(key) is None:
+            params[key] = value
+
+    return params
+
 
 # ══════════════════════════════════════════════════════════════
 # Camera motion presets → appended to positive prompt
@@ -133,7 +432,7 @@ WORKFLOW_META = {
 
 
 # ══════════════════════════════════════════════════════════════
-# Utility: frame count alignment (#4)
+# Utility
 # ══════════════════════════════════════════════════════════════
 
 def snap_num_frames(n):
@@ -148,39 +447,25 @@ def snap_num_frames(n):
     return max(17, min(result, 241))
 
 
-# ══════════════════════════════════════════════════════════════
-# Image preparation (#14 — aspect ratio handling)
-# ══════════════════════════════════════════════════════════════
-
 def download_image(url):
-    """Download image from URL, return raw bytes."""
     return urllib.request.urlopen(url).read()
 
 
 def prepare_image_for_resolution(img_bytes, target_w, target_h):
-    """Center-crop and resize image to exactly match target resolution.
-    Prevents stretching artifacts from mismatched aspect ratios."""
+    """Center-crop and resize to match target resolution."""
     img = Image.open(BytesIO(img_bytes)).convert("RGB")
-
     src_ratio = img.width / img.height
     tgt_ratio = target_w / target_h
 
     if abs(src_ratio - tgt_ratio) < 0.05:
-        # Close enough — just resize
         img = img.resize((target_w, target_h), Image.LANCZOS)
     else:
-        log.info(
-            "Input image %.2f:1 differs from target %.2f:1 — center-cropping",
-            src_ratio, tgt_ratio,
-        )
-        # Scale to cover, then center-crop
         if src_ratio > tgt_ratio:
             new_h = target_h
             new_w = int(target_h * src_ratio)
         else:
             new_w = target_w
             new_h = int(target_w / src_ratio)
-
         img = img.resize((new_w, new_h), Image.LANCZOS)
         left = (new_w - target_w) // 2
         top = (new_h - target_h) // 2
@@ -192,11 +477,10 @@ def prepare_image_for_resolution(img_bytes, target_w, target_h):
 
 
 # ══════════════════════════════════════════════════════════════
-# ComfyUI API helpers (with retry #12)
+# ComfyUI API helpers
 # ══════════════════════════════════════════════════════════════
 
 def wait_for_comfyui(timeout=120):
-    """Block until ComfyUI /system_stats responds. (#11 healthcheck)"""
     start = time.time()
     while time.time() - start < timeout:
         try:
@@ -213,7 +497,6 @@ def wait_for_comfyui(timeout=120):
 
 
 def upload_bytes_to_comfyui(img_bytes, filename):
-    """Upload raw image bytes to ComfyUI input folder."""
     files = {"image": (filename, img_bytes, "image/png")}
     r = requests.post(f"{COMFYUI_URL}/upload/image", files=files)
     r.raise_for_status()
@@ -221,18 +504,15 @@ def upload_bytes_to_comfyui(img_bytes, filename):
 
 
 def queue_workflow_with_retry(workflow, max_retries=1):
-    """Queue workflow with retry on transient failures. (#12)"""
     for attempt in range(max_retries + 1):
         try:
-            payload = {"prompt": workflow}
-            r = requests.post(f"{COMFYUI_URL}/prompt", json=payload)
+            r = requests.post(f"{COMFYUI_URL}/prompt", json={"prompt": workflow})
             r.raise_for_status()
             return r.json()["prompt_id"]
         except requests.exceptions.RequestException as e:
             if attempt == max_retries:
                 raise
-            log.warning("ComfyUI queue failed (attempt %d/%d): %s — retrying in 3s",
-                        attempt + 1, max_retries + 1, e)
+            log.warning("Queue failed (attempt %d): %s — retrying", attempt + 1, e)
             time.sleep(3)
 
 
@@ -255,15 +535,11 @@ def poll_for_result(prompt_id, timeout=600):
                         return {"status": "error", "error": str(status)}
         except requests.exceptions.RequestException:
             pass
-
-        # Log progress every 30 seconds (#7)
         if elapsed - last_log >= 30:
             log.info("Generating... %.0fs elapsed", elapsed)
             last_log = elapsed
-
         time.sleep(3)
-
-    return {"status": "timeout", "error": f"Generation timed out after {timeout}s"}
+    return {"status": "timeout", "error": f"Timed out after {timeout}s"}
 
 
 def get_output_video(outputs):
@@ -273,8 +549,7 @@ def get_output_video(outputs):
                 for video in node_output[key]:
                     fn = video["filename"]
                     sf = video.get("subfolder", "")
-                    url = f"{COMFYUI_URL}/view?filename={fn}&subfolder={sf}&type=output"
-                    return url, fn
+                    return f"{COMFYUI_URL}/view?filename={fn}&subfolder={sf}&type=output", fn
     return None, None
 
 
@@ -285,12 +560,7 @@ def get_output_images(outputs):
     return []
 
 
-# ══════════════════════════════════════════════════════════════
-# Cleanup (#8)
-# ══════════════════════════════════════════════════════════════
-
 def cleanup_job_files(job_id):
-    """Remove temporary files created during this job."""
     pattern = os.path.join(COMFYUI_INPUT_DIR, f"{job_id}_*")
     removed = 0
     for f in glob.glob(pattern):
@@ -304,14 +574,11 @@ def cleanup_job_files(job_id):
 
 
 # ══════════════════════════════════════════════════════════════
-# Preprocessing: depth/canny/pose → static control video
+# Preprocessing: control video generation
 # ══════════════════════════════════════════════════════════════
 
 def generate_preprocessed_map(image_filename, control_type, resolution):
-    """Run preprocessor via ComfyUI, return output image info. (#10 dynamic res)"""
     config = PREPROCESSOR_CONFIGS.get(control_type, PREPROCESSOR_CONFIGS["depth"])
-
-    # Use min(width, height, 1024) for preprocessor resolution (#10)
     preprocess_res = min(resolution, 1024)
 
     workflow = {
@@ -348,19 +615,14 @@ def generate_preprocessed_map(image_filename, control_type, resolution):
 
 
 def create_control_video(preprocessed_image_info, num_frames, width, height, job_id):
-    """Repeat preprocessed frame N times → static MP4 control video."""
     fn = preprocessed_image_info["filename"]
     sf = preprocessed_image_info.get("subfolder", "")
 
-    r = requests.get(
-        f"{COMFYUI_URL}/view",
-        params={"filename": fn, "subfolder": sf, "type": "output"},
-    )
+    r = requests.get(f"{COMFYUI_URL}/view",
+                     params={"filename": fn, "subfolder": sf, "type": "output"})
     r.raise_for_status()
 
-    img = Image.open(BytesIO(r.content)).convert("RGB").resize(
-        (width, height), Image.LANCZOS
-    )
+    img = Image.open(BytesIO(r.content)).convert("RGB").resize((width, height), Image.LANCZOS)
     frame = np.array(img)
 
     output_filename = f"{job_id}_control_video.mp4"
@@ -372,16 +634,43 @@ def create_control_video(preprocessed_image_info, num_frames, width, height, job
         writer.append_data(frame)
     writer.close()
 
-    log.info("Control video created: %d frames at %dx%d", num_frames, width, height)
+    log.info("Control video: %d frames at %dx%d", num_frames, width, height)
     return output_filename
 
 
 # ══════════════════════════════════════════════════════════════
-# Video output handling (#3 — size-aware)
+# INTELLIGENCE LAYER 6: Thumbnail Preview
+# ══════════════════════════════════════════════════════════════
+
+def extract_thumbnail(video_bytes, max_size=320):
+    """Extract first frame from video as JPEG thumbnail (~30-50KB)."""
+    try:
+        reader = imageio.get_reader(BytesIO(video_bytes), format="mp4")
+        frame = reader.get_data(0)
+        reader.close()
+
+        img = Image.fromarray(frame)
+        ratio = min(max_size / img.width, max_size / img.height)
+        new_w = int(img.width * ratio)
+        new_h = int(img.height * ratio)
+        img = img.resize((new_w, new_h), Image.LANCZOS)
+
+        buf = BytesIO()
+        img.save(buf, format="JPEG", quality=80)
+        thumb_bytes = buf.getvalue()
+
+        log.info("Thumbnail: %dx%d (%.1f KB)", new_w, new_h, len(thumb_bytes) / 1024)
+        return base64.b64encode(thumb_bytes).decode("utf-8")
+    except Exception as e:
+        log.warning("Thumbnail extraction failed: %s", e)
+        return None
+
+
+# ══════════════════════════════════════════════════════════════
+# Video output handling
 # ══════════════════════════════════════════════════════════════
 
 def process_video_output(outputs, upload_url=None):
-    """Extract video, optionally upload, return result dict."""
     video_url, filename = get_output_video(outputs)
     if not video_url:
         return None
@@ -393,15 +682,16 @@ def process_video_output(outputs, upload_url=None):
 
     result = {"filename": filename, "video_size_mb": round(size_mb, 2)}
 
-    # Try upload to external URL if provided
+    # Thumbnail preview
+    thumb = extract_thumbnail(video_bytes)
+    if thumb:
+        result["thumbnail_base64"] = thumb
+
+    # Try external upload
     if upload_url:
         try:
-            r = requests.put(
-                upload_url,
-                data=video_bytes,
-                headers={"Content-Type": "video/mp4"},
-                timeout=120,
-            )
+            r = requests.put(upload_url, data=video_bytes,
+                             headers={"Content-Type": "video/mp4"}, timeout=120)
             r.raise_for_status()
             result["video_url"] = upload_url
             log.info("Video uploaded to external URL")
@@ -409,15 +699,10 @@ def process_video_output(outputs, upload_url=None):
         except Exception as e:
             log.warning("External upload failed: %s — falling back to base64", e)
 
-    # Base64 fallback with size check
     if len(video_bytes) > MAX_B64_RAW_BYTES:
-        log.warning(
-            "Video %.1f MB exceeds safe base64 limit (10 MB). "
-            "Set output_upload_url for large videos.", size_mb
-        )
         result["warning"] = (
             f"Video is {size_mb:.1f} MB. Response may be truncated. "
-            "Use output_upload_url param for reliable delivery of large files."
+            "Use output_upload_url for reliable delivery."
         )
 
     result["video_base64"] = base64.b64encode(video_bytes).decode("utf-8")
@@ -429,13 +714,7 @@ def process_video_output(outputs, upload_url=None):
 # ══════════════════════════════════════════════════════════════
 
 def inject_ip_adapter(workflow, meta, params):
-    """Inject IP Adapter into both model chains (high + low noise).
-    NOTE: IP Adapter with Wan 2.2 video models may require Kijai WanVideoWrapper
-    for full compatibility. This injects the standard ComfyUI_IPAdapter_plus nodes.
-    Test on your specific hardware/model combination."""
-    if params.get("ip_adapter_strength", 0) <= 0:
-        return workflow
-    if not params.get("ip_adapter_filename"):
+    if params.get("ip_adapter_strength", 0) <= 0 or not params.get("ip_adapter_filename"):
         return workflow
 
     log.info("Injecting IP Adapter (strength=%.2f)", params["ip_adapter_strength"])
@@ -446,59 +725,34 @@ def inject_ip_adapter(workflow, meta, params):
         "_meta": {"title": "IP Adapter Reference"},
     }
 
-    # High noise model chain
-    high_sampler = meta["sampler_high"]
-    high_model_src = workflow[high_sampler]["inputs"]["model"]
+    for tag, sampler_key in [("h", "sampler_high"), ("l", "sampler_low")]:
+        sampler = meta[sampler_key]
+        model_src = workflow[sampler]["inputs"]["model"]
 
-    workflow["ipa_loader_h"] = {
-        "inputs": {"preset": "Composition", "model": high_model_src},
-        "class_type": "IPAdapterUnifiedLoaderCommunity",
-        "_meta": {"title": "IPAdapter Loader (High)"},
-    }
-    workflow["ipa_apply_h"] = {
-        "inputs": {
-            "weight": params["ip_adapter_strength"],
-            "start_at": 0, "end_at": 1, "weight_type": "standard",
-            "model": ["ipa_loader_h", 0],
-            "ipadapter": ["ipa_loader_h", 1],
-            "image": ["ipa_image", 0],
-        },
-        "class_type": "IPAdapter",
-        "_meta": {"title": "IPAdapter (High)"},
-    }
-    workflow[high_sampler]["inputs"]["model"] = ["ipa_apply_h", 0]
-
-    # Low noise model chain
-    low_sampler = meta["sampler_low"]
-    low_model_src = workflow[low_sampler]["inputs"]["model"]
-
-    workflow["ipa_loader_l"] = {
-        "inputs": {"preset": "Composition", "model": low_model_src},
-        "class_type": "IPAdapterUnifiedLoaderCommunity",
-        "_meta": {"title": "IPAdapter Loader (Low)"},
-    }
-    workflow["ipa_apply_l"] = {
-        "inputs": {
-            "weight": params["ip_adapter_strength"],
-            "start_at": 0, "end_at": 1, "weight_type": "standard",
-            "model": ["ipa_loader_l", 0],
-            "ipadapter": ["ipa_loader_l", 1],
-            "image": ["ipa_image", 0],
-        },
-        "class_type": "IPAdapter",
-        "_meta": {"title": "IPAdapter (Low)"},
-    }
-    workflow[low_sampler]["inputs"]["model"] = ["ipa_apply_l", 0]
+        workflow[f"ipa_loader_{tag}"] = {
+            "inputs": {"preset": "Composition", "model": model_src},
+            "class_type": "IPAdapterUnifiedLoaderCommunity",
+            "_meta": {"title": f"IPAdapter Loader ({tag.upper()})"},
+        }
+        workflow[f"ipa_apply_{tag}"] = {
+            "inputs": {
+                "weight": params["ip_adapter_strength"],
+                "start_at": 0, "end_at": 1, "weight_type": "standard",
+                "model": [f"ipa_loader_{tag}", 0],
+                "ipadapter": [f"ipa_loader_{tag}", 1],
+                "image": ["ipa_image", 0],
+            },
+            "class_type": "IPAdapter",
+            "_meta": {"title": f"IPAdapter ({tag.upper()})"},
+        }
+        workflow[sampler]["inputs"]["model"] = [f"ipa_apply_{tag}", 0]
 
     return workflow
 
 
 def inject_postprocessing(workflow, meta, params):
-    """Insert post-processing chain between VAEDecode and CreateVideo.
-    Only injects nodes where the param value is > 0."""
     vae_node = meta["vae_decode"]
     video_node = meta["create_video"]
-
     chain = []
 
     if params.get("film_grain_strength", 0) > 0:
@@ -508,75 +762,61 @@ def inject_postprocessing(workflow, meta, params):
                 "scale": params.get("film_grain_scale", 10),
                 "temperature": 0, "vignette": 0,
             },
-            "class_type": "FilmGrain",
-            "_meta": {"title": "FilmGrain"},
+            "class_type": "FilmGrain", "_meta": {"title": "FilmGrain"},
         }))
 
     if params.get("chromatic_aberration", 0) > 0:
-        shift = params["chromatic_aberration"]
+        s = params["chromatic_aberration"]
         chain.append(("pp_chroma", {
             "inputs": {
-                "red_shift": shift, "red_direction": "horizontal",
+                "red_shift": s, "red_direction": "horizontal",
                 "green_shift": 0, "green_direction": "horizontal",
-                "blue_shift": shift, "blue_direction": "horizontal",
+                "blue_shift": s, "blue_direction": "horizontal",
             },
-            "class_type": "ChromaticAberration",
-            "_meta": {"title": "ChromaticAberration"},
+            "class_type": "ChromaticAberration", "_meta": {"title": "ChromaticAberration"},
         }))
 
     if params.get("vignette_strength", 0) > 0:
         chain.append(("pp_vignette", {
             "inputs": {"vignette": params["vignette_strength"]},
-            "class_type": "Vignette",
-            "_meta": {"title": "Vignette"},
+            "class_type": "Vignette", "_meta": {"title": "Vignette"},
         }))
 
     if params.get("color_temperature", 0) != 0:
         chain.append(("pp_color", {
             "inputs": {
                 "temperature": params["color_temperature"],
-                "hue": 0, "brightness": 0, "contrast": 0,
-                "saturation": 0, "gamma": 1,
+                "hue": 0, "brightness": 0, "contrast": 0, "saturation": 0, "gamma": 1,
             },
-            "class_type": "ColorCorrect",
-            "_meta": {"title": "ColorCorrect"},
+            "class_type": "ColorCorrect", "_meta": {"title": "ColorCorrect"},
         }))
 
     if not chain:
         return workflow
 
     log.info("Injecting %d post-processing nodes", len(chain))
-
     chain[0][1]["inputs"]["image"] = [vae_node, 0]
     for i in range(1, len(chain)):
         chain[i][1]["inputs"]["image"] = [chain[i - 1][0], 0]
-
     workflow[video_node]["inputs"]["images"] = [chain[-1][0], 0]
-
-    for node_id, node_data in chain:
-        workflow[node_id] = node_data
-
+    for nid, ndata in chain:
+        workflow[nid] = ndata
     return workflow
 
 
 def inject_upscale(workflow, meta, params):
-    """Insert RealESRGAN x4 upscale before CreateVideo."""
     if not params.get("upscale_4k", False):
         return workflow
-
-    log.info("Injecting 4K upscale (RealESRGAN x4)")
+    log.info("Injecting 4K upscale")
     video_node = meta["create_video"]
-    current_source = workflow[video_node]["inputs"]["images"]
-
+    src = workflow[video_node]["inputs"]["images"]
     workflow["up_loader"] = {
         "inputs": {"model_name": "RealESRGAN_x4plus.pth"},
-        "class_type": "UpscaleModelLoader",
-        "_meta": {"title": "Load Upscale Model"},
+        "class_type": "UpscaleModelLoader", "_meta": {"title": "Load Upscale Model"},
     }
     workflow["up_scale"] = {
-        "inputs": {"upscale_model": ["up_loader", 0], "image": current_source},
-        "class_type": "ImageUpscaleWithModel",
-        "_meta": {"title": "Upscale x4"},
+        "inputs": {"upscale_model": ["up_loader", 0], "image": src},
+        "class_type": "ImageUpscaleWithModel", "_meta": {"title": "Upscale x4"},
     }
     workflow[video_node]["inputs"]["images"] = ["up_scale", 0]
     return workflow
@@ -587,9 +827,7 @@ def inject_upscale(workflow, meta, params):
 # ══════════════════════════════════════════════════════════════
 
 def build_workflow(mode, params):
-    """Load base workflow, apply params, inject optional layers."""
     meta = WORKFLOW_META[mode]
-
     with open(f"/app/workflows/{meta['file']}", "r") as f:
         workflow = json.load(f)
     workflow = copy.deepcopy(workflow)
@@ -603,23 +841,20 @@ def build_workflow(mode, params):
     if "end_image" in meta and params.get("last_frame_filename"):
         workflow[meta["end_image"]]["inputs"]["image"] = params["last_frame_filename"]
 
-    # Prompt with camera motion
+    # Prompt (already adapted by intelligence layers)
     prompt_text = params["prompt"]
-    camera = params.get("camera_motion", "static")
-    camera_text = CAMERA_PRESETS.get(camera, "")
+    camera_text = CAMERA_PRESETS.get(params.get("camera_motion", "static"), "")
     if camera_text:
         prompt_text = f"{prompt_text} {camera_text}"
 
     workflow[meta["positive_prompt"]]["inputs"]["text"] = prompt_text
     workflow[meta["negative_prompt"]]["inputs"]["text"] = params["negative_prompt"]
 
-    # Resolution + frame count
     res_node = meta["resolution"]
     workflow[res_node]["inputs"]["width"] = params["width"]
     workflow[res_node]["inputs"]["height"] = params["height"]
     workflow[res_node]["inputs"]["length"] = params["num_frames"]
 
-    # Samplers
     high = meta["sampler_high"]
     low = meta["sampler_low"]
     workflow[high]["inputs"]["noise_seed"] = seed
@@ -632,16 +867,58 @@ def build_workflow(mode, params):
         workflow[low]["inputs"]["cfg"] = params["cfg_scale"]
         workflow[low]["inputs"]["start_at_step"] = params["steps"] // 2
 
-    # Control video
     if "control_video" in meta and params.get("control_video_filename"):
         workflow[meta["control_video"]]["inputs"]["file"] = params["control_video_filename"]
 
-    # Injection layers (order matters: IP Adapter → PostFX → Upscale)
     workflow = inject_ip_adapter(workflow, meta, params)
     workflow = inject_postprocessing(workflow, meta, params)
     workflow = inject_upscale(workflow, meta, params)
-
     return workflow
+
+
+# ══════════════════════════════════════════════════════════════
+# INTELLIGENCE LAYER 5: Retry with Fallback
+# ══════════════════════════════════════════════════════════════
+
+def run_generation(mode, params, job_id, job_input):
+    """Run a generation pipeline. Returns (result_dict, error_string)."""
+    if mode == "fun_control":
+        control_video_url = job_input.get("control_video_url")
+        if control_video_url:
+            vid_data = urllib.request.urlopen(control_video_url).read()
+            cv_name = f"{job_id}_control_video.mp4"
+            os.makedirs(COMFYUI_INPUT_DIR, exist_ok=True)
+            with open(os.path.join(COMFYUI_INPUT_DIR, cv_name), "wb") as f:
+                f.write(vid_data)
+            params["control_video_filename"] = cv_name
+        else:
+            control_type = params.get("control_type", "depth")
+            preprocess_res = min(params["width"], params["height"])
+            preprocessed = generate_preprocessed_map(
+                params["first_frame_filename"], control_type, preprocess_res
+            )
+            if not preprocessed:
+                return None, f"Failed to generate {control_type} map"
+            cv_name = create_control_video(
+                preprocessed, params["num_frames"],
+                params["width"], params["height"], job_id
+            )
+            params["control_video_filename"] = cv_name
+
+    workflow = build_workflow(mode, params)
+    prompt_id = queue_workflow_with_retry(workflow, max_retries=1)
+    log.info("Queued %s workflow %s", mode, prompt_id[:8])
+
+    result = poll_for_result(prompt_id, timeout=600)
+
+    if result["status"] == "completed":
+        upload_url = job_input.get("output_upload_url")
+        video_result = process_video_output(result["outputs"], upload_url)
+        if video_result:
+            return video_result, None
+        return None, "No video output found"
+
+    return None, result.get("error", "Unknown error")
 
 
 # ══════════════════════════════════════════════════════════════
@@ -656,27 +933,28 @@ def handler(job):
     {
         "input": {
             "first_frame_url": "https://...",          # Required
-            "last_frame_url": "https://...",            # Required for flf2v
+            "last_frame_url": "https://...",            # For flf2v / auto-detect
             "prompt": "...",                            # Required
-            "negative_prompt": "morphing...",           # Optional
-            "mode": "i2v",                              # "i2v" | "flf2v" | "fun_control"
+            "negative_prompt": "morphing...",           # Optional (auto-enhanced)
+            "mode": "auto",                             # "auto" | "i2v" | "flf2v" | "fun_control"
+            "quality": null,                            # "fast"|"balanced"|"cinematic"|"product"|"max"
             "duration_seconds": 5,                      # 3-15
             "resolution": "720p",                       # "480p" | "720p" | "1080p"
-            "cfg_scale": 4.0,                           # 1-20 (ignored for i2v LoRA)
-            "steps": 20,                                # 10-50 (ignored for i2v LoRA)
-            "seed": -1,                                 # -1 = random
+            "cfg_scale": 4.0,                           # (ignored for i2v LoRA)
+            "steps": 20,                                # (ignored for i2v LoRA)
+            "seed": -1,
             "control_type": "depth",                    # "depth" | "canny" | "pose"
-            "control_video_url": null,                  # Pre-made control video
-            "ip_adapter_strength": 0.0,                 # 0 = off
-            "ip_adapter_image_url": null,               # Reference for IP Adapter
-            "film_grain_strength": 0.0,                 # 0 = off
-            "film_grain_scale": 10,                     # 1-100
-            "chromatic_aberration": 0.0,                # 0 = off, 0.5-2.0 typical
-            "vignette_strength": 0.0,                   # 0-1
-            "color_temperature": 0.0,                   # -10 to +10
-            "upscale_4k": false,                        # RealESRGAN x4
-            "camera_motion": "static",                  # See CAMERA_PRESETS
-            "output_upload_url": null                    # Presigned URL for large videos
+            "control_video_url": null,
+            "ip_adapter_strength": 0.0,
+            "ip_adapter_image_url": null,
+            "film_grain_strength": 0.0,
+            "film_grain_scale": 10,
+            "chromatic_aberration": 0.0,
+            "vignette_strength": 0.0,
+            "color_temperature": 0.0,
+            "upscale_4k": false,
+            "camera_motion": "static",
+            "output_upload_url": null
         }
     }
     """
@@ -691,20 +969,31 @@ def handler(job):
     if not first_frame_url:
         return {"error": "first_frame_url is required"}
 
-    mode = job_input.get("mode", "i2v")
+    prompt = job_input.get("prompt", "")
+
+    # ── INTELLIGENCE: Product detection + smart negatives ──
+    user_negative = job_input.get(
+        "negative_prompt", "morphing, deforming, blurry, low quality, distorted"
+    )
+    enhanced_negative, product_type = build_smart_negative(user_negative, prompt)
+
+    # ── INTELLIGENCE: Auto-mode selection ──
+    requested_mode = job_input.get("mode", "auto")
+    if requested_mode == "auto":
+        mode = auto_select_mode(job_input, product_type)
+    else:
+        mode = requested_mode
+
     if mode not in WORKFLOW_META:
-        return {"error": f"Invalid mode: {mode}. Use i2v, flf2v, or fun_control."}
+        return {"error": f"Invalid mode: {mode}. Use auto, i2v, flf2v, or fun_control."}
 
     if mode == "flf2v" and not job_input.get("last_frame_url"):
         return {"error": "last_frame_url is required for flf2v mode"}
 
     # ── Extract params ──
     params = {
-        "prompt": job_input.get("prompt", ""),
-        "negative_prompt": job_input.get(
-            "negative_prompt",
-            "morphing, deforming, blurry, low quality, distorted",
-        ),
+        "prompt": prompt,
+        "negative_prompt": enhanced_negative,
         "duration_seconds": min(max(job_input.get("duration_seconds", 5), 3), 15),
         "resolution": job_input.get("resolution", "720p"),
         "cfg_scale": job_input.get("cfg_scale", 4.0),
@@ -721,35 +1010,41 @@ def handler(job):
         "camera_motion": job_input.get("camera_motion", "static"),
     }
 
+    # ── INTELLIGENCE: Quality presets ──
+    quality = job_input.get("quality")
+    if quality:
+        params = apply_quality_preset(params, quality, job_input)
+        # Preset may override mode
+        if "mode" in QUALITY_PRESETS.get(quality, {}) and requested_mode == "auto":
+            mode = QUALITY_PRESETS[quality]["mode"]
+            log.info("Quality preset overrides mode → %s", mode)
+
+    # ── INTELLIGENCE: Prompt adapter ──
+    params["prompt"] = adapt_prompt_for_wan(params["prompt"], product_type)
+
     # ── Resolution ──
-    res_map = {
-        "480p": (832, 480),
-        "720p": (1280, 720),
-        "1080p": (1920, 1080),
-    }
+    res_map = {"480p": (832, 480), "720p": (1280, 720), "1080p": (1920, 1080)}
     width, height = res_map.get(params["resolution"], (1280, 720))
     params["width"] = width
     params["height"] = height
 
-    # ── Frame count with VAE alignment (#4) ──
+    # ── Frame count ──
     raw_frames = int(params["duration_seconds"] * 16) + 1
     params["num_frames"] = snap_num_frames(raw_frames)
-    if params["num_frames"] != raw_frames:
-        log.info("Snapped frame count %d → %d for VAE alignment", raw_frames, params["num_frames"])
 
     log.info(
-        "Mode=%s | %dx%d | %d frames (%.1fs) | steps=%d | seed=%s",
+        "Mode=%s | %dx%d | %d frames (%.1fs) | product=%s | quality=%s",
         mode, width, height, params["num_frames"],
-        params["duration_seconds"], params["steps"],
-        params["seed"] if params["seed"] >= 0 else "random",
+        params["duration_seconds"],
+        product_type or "none",
+        quality or "custom",
     )
 
     try:
-        # ── Healthcheck (#11) ──
         if not wait_for_comfyui(timeout=30):
-            return {"error": "ComfyUI not ready after 30s"}
+            return {"error": "ComfyUI not ready"}
 
-        # ── Download + prepare + upload first frame (#5 unique names, #14 aspect ratio) ──
+        # ── Prepare images ──
         log.info("Preparing first frame...")
         raw_img = download_image(first_frame_url)
         prepared_img = prepare_image_for_resolution(raw_img, width, height)
@@ -757,7 +1052,6 @@ def handler(job):
         upload_bytes_to_comfyui(prepared_img, ff_name)
         params["first_frame_filename"] = ff_name
 
-        # ── Last frame (FLF2V) ──
         if mode == "flf2v":
             log.info("Preparing last frame...")
             raw_last = download_image(job_input["last_frame_url"])
@@ -766,75 +1060,49 @@ def handler(job):
             upload_bytes_to_comfyui(prepared_last, lf_name)
             params["last_frame_filename"] = lf_name
 
-        # ── IP Adapter reference ──
         ip_url = job_input.get("ip_adapter_image_url")
         if ip_url and params["ip_adapter_strength"] > 0:
-            log.info("Uploading IP Adapter reference...")
             ip_img = download_image(ip_url)
             ip_name = f"{job_id}_ip_adapter.png"
             upload_bytes_to_comfyui(ip_img, ip_name)
             params["ip_adapter_filename"] = ip_name
 
-        # ── Fun Control: generate or upload control video ──
-        if mode == "fun_control":
-            control_video_url = job_input.get("control_video_url")
-            if control_video_url:
-                log.info("Downloading pre-made control video...")
-                vid_data = urllib.request.urlopen(control_video_url).read()
-                cv_name = f"{job_id}_control_video.mp4"
-                os.makedirs(COMFYUI_INPUT_DIR, exist_ok=True)
-                with open(os.path.join(COMFYUI_INPUT_DIR, cv_name), "wb") as f:
-                    f.write(vid_data)
-                params["control_video_filename"] = cv_name
-            else:
-                # Auto-generate control video from first frame (#10 dynamic resolution)
-                control_type = params.get("control_type", "depth")
-                preprocess_res = min(width, height)
-                preprocessed = generate_preprocessed_map(
-                    ff_name, control_type, preprocess_res
-                )
-                if not preprocessed:
-                    return {"error": f"Failed to generate {control_type} map"}
+        # ── INTELLIGENCE: Run with fallback ──
+        video_result, error = run_generation(mode, params, job_id, job_input)
+        fallback_used = False
 
-                cv_name = create_control_video(
-                    preprocessed, params["num_frames"], width, height, job_id
-                )
-                params["control_video_filename"] = cv_name
+        if error and mode == "fun_control":
+            log.warning("fun_control failed: %s — falling back to i2v", error)
+            fallback_used = True
+            mode = "i2v"
+            video_result, error = run_generation(mode, params, job_id, job_input)
 
-        # ── Build and queue workflow (#12 retry) ──
-        log.info("Building %s workflow...", mode)
-        workflow = build_workflow(mode, params)
-        prompt_id = queue_workflow_with_retry(workflow, max_retries=1)
-        log.info("Queued workflow %s — generating...", prompt_id[:8])
+        if error:
+            return {"error": error, "attempted_mode": mode}
 
-        # ── Poll for result (#7 progress logging) ──
-        result = poll_for_result(prompt_id, timeout=600)
+        elapsed = time.time() - t_start
+        log.info("═══ Job %s completed in %.0fs ═══", job_id[:8], elapsed)
 
-        if result["status"] == "completed":
-            # ── Process output (#3 size-aware) ──
-            upload_url = job_input.get("output_upload_url")
-            video_result = process_video_output(result["outputs"], upload_url)
+        response = {
+            "status": "COMPLETED",
+            "mode": mode,
+            "elapsed_seconds": round(elapsed, 1),
+            "product_type": product_type,
+            "params_used": params,
+            **video_result,
+        }
 
-            if video_result:
-                elapsed = time.time() - t_start
-                log.info("═══ Job %s completed in %.0fs ═══", job_id[:8], elapsed)
-                return {
-                    "status": "COMPLETED",
-                    "mode": mode,
-                    "elapsed_seconds": round(elapsed, 1),
-                    "params_used": params,
-                    **video_result,
-                }
-            return {"error": "No video output found in results"}
+        if fallback_used:
+            response["fallback"] = True
+            response["fallback_reason"] = "fun_control pipeline failed, used i2v instead"
 
-        return {"error": result.get("error", "Unknown error")}
+        return response
 
     except Exception as e:
         log.exception("Job %s failed", job_id[:8])
         return {"error": str(e)}
 
     finally:
-        # ── Cleanup temp files (#8) ──
         cleanup_job_files(job_id)
 
 
