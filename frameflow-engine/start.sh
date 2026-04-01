@@ -56,10 +56,10 @@ download_model "Comfy-Org/Wan_2.2_ComfyUI_repackaged" \
 
 # ── CLIP text encoder ──
 echo "Checking CLIP model..."
-mkdir -p "$MODEL_BASE/clip"
+mkdir -p "$MODEL_BASE/text_encoders"
 download_model "Comfy-Org/Wan_2.2_ComfyUI_repackaged" \
     "split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors" \
-    "$MODEL_BASE/clip/umt5_xxl_fp8_e4m3fn_scaled.safetensors"
+    "$MODEL_BASE/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors"
 
 # ── VAE ──
 echo "Checking VAE model..."
@@ -121,7 +121,7 @@ fi
 echo "Setting up model symlinks..."
 
 mkdir -p "$COMFY_MODELS/diffusion_models"
-mkdir -p "$COMFY_MODELS/clip"
+mkdir -p "$COMFY_MODELS/text_encoders"
 mkdir -p "$COMFY_MODELS/vae"
 mkdir -p "$COMFY_MODELS/loras"
 mkdir -p "$COMFY_MODELS/upscale_models"
@@ -131,8 +131,8 @@ mkdir -p "$COMFY_MODELS/rife"
 for f in "$MODEL_BASE/diffusion_models"/*.safetensors; do
     [ -f "$f" ] && ln -sf "$f" "$COMFY_MODELS/diffusion_models/$(basename $f)" 2>/dev/null || true
 done
-for f in "$MODEL_BASE/clip"/*.safetensors; do
-    [ -f "$f" ] && ln -sf "$f" "$COMFY_MODELS/clip/$(basename $f)" 2>/dev/null || true
+for f in "$MODEL_BASE/text_encoders"/*.safetensors; do
+    [ -f "$f" ] && ln -sf "$f" "$COMFY_MODELS/text_encoders/$(basename $f)" 2>/dev/null || true
 done
 for f in "$MODEL_BASE/vae"/*.safetensors; do
     [ -f "$f" ] && ln -sf "$f" "$COMFY_MODELS/vae/$(basename $f)" 2>/dev/null || true
