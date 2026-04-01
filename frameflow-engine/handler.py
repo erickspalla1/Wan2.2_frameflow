@@ -205,12 +205,13 @@ QUALITY_PRESETS = {
     "product": {
         "mode": "fun_control", "steps": 25, "cfg_scale": 3.5,
         "control_type": "depth+canny", "ip_adapter_strength": 0.6, "motion_intensity": 0.3,
-        "description": "Product — dual control + IP adapter + slow motion (~3-4 min)",
+        "overcapture": True,
+        "description": "Product — dual control + IP adapter + overcapture (~5-8 min)",
     },
     "max": {
         "mode": "fun_control", "steps": 30, "cfg_scale": 4.0,
-        "control_type": "depth+canny", "upscale_4k": True,
-        "description": "Maximum quality — 30 steps + dual control + 4K (~5-8 min)",
+        "control_type": "depth+canny", "upscale_4k": True, "overcapture": True,
+        "description": "Maximum quality — 30 steps + dual control + overcapture + 4K (~8-15 min)",
     },
 }
 
@@ -269,6 +270,197 @@ def apply_motion_intensity(params, intensity, user_set_cfg):
 
     params["negative_prompt"] = f"{params['negative_prompt']}, {motion_neg}"
     return params
+
+
+# ══════════════════════════════════════════════════════════════
+# Overcapture Mode
+# ══════════════════════════════════════════════════════════════
+
+def compute_overcapture_ratio(motion_intensity, product_type):
+    """Compute overcapture ratio based on context.
+    Higher ratio = more frames generated = smoother result after speedup."""
+    if product_type:
+        if motion_intensity <= 0.3:
+            return 3.0  # Product, minimal motion → max overcapture
+        elif motion_intensity <= 0.6:
+            return 2.0  # Product, moderate motion
+        else:
+            return 1.5  # Product, dynamic motion
+    else:
+        if motion_intensity <= 0.3:
+            return 2.0  # Non-product, slow → decent overcapture
+        elif motion_intensity <= 0.6:
+            return 1.5  # Balanced
+        else:
+            return 1.0  # Dynamic — no overcapture, keep energy
+
+
+def apply_overcapture(params, product_type):
+    """Apply overcapture: increase frames, slow prompt, compute playback speed.
+    Mutates params. Returns overcapture metadata dict."""
+    ratio = compute_overcapture_ratio(params["motion_intensity"], product_type)
+
+    if ratio <= 1.0:
+        return {"overcapture_active": False, "ratio": 1.0, "playback_speed": 1.0}
+
+    original_frames = params["num_frames"]
+    expanded_frames = snap_num_frames(int(original_frames * ratio))
+
+    # Prepend extreme slowness to prompt
+    params["prompt"] = (
+        f"Extremely slow smooth movement, ultra slow motion. {params['prompt']}"
+    )
+    # Strengthen anti-fast negatives
+    params["negative_prompt"] = (
+        f"{params['negative_prompt']}, fast motion, sudden movement, quick action, "
+        "rapid changes, speed, acceleration"
+    )
+    params["num_frames"] = expanded_frames
+
+    actual_ratio = expanded_frames / original_frames
+    playback_speed = round(actual_ratio, 2)
+
+    log.info("Overcapture: %d → %d frames (%.1fx), playback_speed=%.2f",
+             original_frames, expanded_frames, actual_ratio, playback_speed)
+
+    return {
+        "overcapture_active": True,
+        "ratio": round(actual_ratio, 2),
+        "original_frames": original_frames,
+        "expanded_frames": expanded_frames,
+        "playback_speed": playback_speed,
+    }
+
+
+def _score_frame_vs_ref(frame_img, ref_img):
+    """Quick quality score: histogram correlation + pixel similarity (0-1)."""
+    hist = _histogram_correlation(ref_img, frame_img)
+    pixel = _pixel_similarity(ref_img, frame_img)
+    return 0.5 * hist + 0.5 * pixel
+
+
+def overcapture_postprocess(video_bytes, first_frame_bytes, overcapture_meta, job_id):
+    """Post-process overcaptured video:
+    1. Score each frame against first frame
+    2. Find best segment (sliding window = original_frames)
+    3. Filter frames with anomalous jumps
+    4. Re-encode the curated segment
+
+    Returns (curated_video_bytes, postprocess_info) or (original_bytes, info) on failure.
+    """
+    if not overcapture_meta.get("overcapture_active"):
+        return video_bytes, {"curated": False}
+
+    original_frames = overcapture_meta["original_frames"]
+
+    try:
+        ref_img = Image.open(BytesIO(first_frame_bytes)).convert("RGB")
+        reader = imageio.get_reader(BytesIO(video_bytes), format="mp4")
+        all_frames = []
+        all_scores = []
+
+        for i in range(reader.count_frames()):
+            frame_data = reader.get_data(i)
+            frame_img = Image.fromarray(frame_data).convert("RGB")
+            all_frames.append(frame_data)
+            # Score every 4th frame for speed (interpolate rest)
+            if i % 4 == 0:
+                score = _score_frame_vs_ref(frame_img, ref_img)
+                all_scores.append((i, score))
+
+        reader.close()
+        total = len(all_frames)
+
+        if total <= original_frames:
+            log.info("Overcapture: not enough frames to select segment, using all")
+            return video_bytes, {"curated": False, "reason": "too_few_frames"}
+
+        # Build per-frame score array (interpolate between sampled scores)
+        frame_scores = np.ones(total, dtype=np.float32)
+        for j in range(len(all_scores)):
+            idx, sc = all_scores[j]
+            frame_scores[idx] = sc
+        # Linear interpolate gaps
+        sampled_indices = [s[0] for s in all_scores]
+        sampled_values = [s[1] for s in all_scores]
+        frame_scores = np.interp(range(total), sampled_indices, sampled_values)
+
+        # Sliding window: find best segment of length original_frames
+        window = original_frames
+        best_start = 0
+        best_score = -1
+
+        for start in range(0, total - window + 1, 2):  # step 2 for speed
+            segment_score = float(np.mean(frame_scores[start:start + window]))
+            if segment_score > best_score:
+                best_score = segment_score
+                best_start = start
+
+        log.info("Best segment: frames %d-%d (score=%.3f)",
+                 best_start, best_start + window, best_score)
+
+        # Extract segment
+        segment = all_frames[best_start:best_start + window]
+
+        # Frame quality filter: remove frames with abnormal jumps
+        if len(segment) > 10:
+            filtered = [segment[0]]
+            prev_arr = np.array(segment[0], dtype=np.float32) / 255.0
+            dropped = 0
+
+            for k in range(1, len(segment)):
+                curr_arr = np.array(segment[k], dtype=np.float32) / 255.0
+                diff = float(np.mean(np.abs(curr_arr - prev_arr)))
+                # Adaptive threshold: allow more diff for later frames
+                threshold = 0.08 + (k / len(segment)) * 0.04
+                if diff > threshold * 3:
+                    # Major glitch — drop this frame
+                    dropped += 1
+                    continue
+                filtered.append(segment[k])
+                prev_arr = curr_arr
+
+            if dropped > 0:
+                log.info("Frame filter: dropped %d anomalous frames", dropped)
+            segment = filtered
+
+        if len(segment) < 10:
+            log.warning("Overcapture: too few frames after filtering, using original")
+            return video_bytes, {"curated": False, "reason": "filter_too_aggressive"}
+
+        # Re-encode curated segment
+        output_path = os.path.join(COMFYUI_INPUT_DIR, f"{job_id}_curated.mp4")
+        writer = imageio.get_writer(output_path, fps=16, codec="libx264", quality=8)
+        for f in segment:
+            writer.append_data(f)
+        writer.close()
+
+        with open(output_path, "rb") as fh:
+            curated_bytes = fh.read()
+
+        # Clean up temp file
+        try:
+            os.remove(output_path)
+        except OSError:
+            pass
+
+        curated_mb = len(curated_bytes) / (1024 * 1024)
+        original_mb = len(video_bytes) / (1024 * 1024)
+        log.info("Overcapture result: %.1f MB → %.1f MB (%d frames curated)",
+                 original_mb, curated_mb, len(segment))
+
+        return curated_bytes, {
+            "curated": True,
+            "segment_start": best_start,
+            "segment_score": round(best_score, 3),
+            "frames_generated": total,
+            "frames_selected": len(segment),
+            "frames_dropped": total - best_start - window + (window - len(segment)),
+        }
+
+    except Exception as e:
+        log.warning("Overcapture postprocess failed: %s — returning original", e)
+        return video_bytes, {"curated": False, "reason": str(e)}
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1040,6 +1232,7 @@ def process_single_job(job):
         "upscale_4k": job_input.get("upscale_4k", False),
         "camera_motion": job_input.get("camera_motion", "static"),
         "motion_intensity": max(0.0, min(1.0, float(job_input.get("motion_intensity", 0.5)))),
+        "overcapture": job_input.get("overcapture", False),
     }
 
     # ── Intelligence: Quality preset ──
@@ -1074,9 +1267,15 @@ def process_single_job(job):
     params["height"] = height
     params["num_frames"] = snap_num_frames(int(params["duration_seconds"] * 16) + 1)
 
-    log.info("Mode=%s | %dx%d | %d frames | product=%s | quality=%s | motion=%.1f",
+    # ── Intelligence: Overcapture ──
+    overcapture_meta = {"overcapture_active": False, "ratio": 1.0, "playback_speed": 1.0}
+    if params.get("overcapture"):
+        overcapture_meta = apply_overcapture(params, product_type)
+
+    log.info("Mode=%s | %dx%d | %d frames | product=%s | quality=%s | motion=%.1f | overcapture=%.1fx",
              mode, width, height, params["num_frames"],
-             product_type or "none", quality or "custom", params["motion_intensity"])
+             product_type or "none", quality or "custom", params["motion_intensity"],
+             overcapture_meta["ratio"])
 
     try:
         if not wait_for_comfyui(timeout=30):
@@ -1164,6 +1363,21 @@ def process_single_job(job):
                                  retry_score, score)
                         auto_corrected = False
 
+        # ── Overcapture postprocess: best segment + frame filter ──
+        overcapture_info = {"curated": False}
+        if overcapture_meta["overcapture_active"] and video_bytes:
+            curated_bytes, overcapture_info = overcapture_postprocess(
+                video_bytes, prepared_img, overcapture_meta, job_id)
+
+            # Re-encode output with curated video
+            if overcapture_info["curated"]:
+                curated_mb = len(curated_bytes) / (1024 * 1024)
+                video_result["video_size_mb"] = round(curated_mb, 2)
+                video_result["video_base64"] = base64.b64encode(curated_bytes).decode("utf-8")
+                thumb = extract_thumbnail(curated_bytes)
+                if thumb:
+                    video_result["thumbnail_base64"] = thumb
+
         elapsed = time.time() - t_start
         log.info("═══ Job %s completed in %.0fs ═══", job_id[:8], elapsed)
 
@@ -1174,6 +1388,11 @@ def process_single_job(job):
             "product_type": product_type,
             "identity_score": identity_score,
             "auto_corrected": auto_corrected,
+            "overcapture": {
+                "active": overcapture_meta["overcapture_active"],
+                "playback_speed": overcapture_meta.get("playback_speed", 1.0),
+                **overcapture_info,
+            },
             "params_used": params,
             **video_result,
         }
