@@ -58,7 +58,7 @@ download_model "Comfy-Org/Wan_2.2_ComfyUI_repackaged" \
 echo "Checking CLIP model..."
 mkdir -p "$MODEL_BASE/clip"
 download_model "Comfy-Org/Wan_2.2_ComfyUI_repackaged" \
-    "split_files/clip/umt5_xxl_fp8_e4m3fn_scaled.safetensors" \
+    "split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors" \
     "$MODEL_BASE/clip/umt5_xxl_fp8_e4m3fn_scaled.safetensors"
 
 # ── VAE ──
