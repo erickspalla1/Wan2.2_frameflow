@@ -105,7 +105,7 @@ if [ ! -f "$RIFE_DIR/rife47.pth" ]; then
     python3 -c "
 from huggingface_hub import hf_hub_download
 import shutil, os
-path = hf_hub_download(repo_id='Fannovel16/RIFE_models', filename='rife47.pth')
+path = hf_hub_download(repo_id='MachineDelusions/RIFE', filename='rife47.pth')
 dest = '$RIFE_DIR/rife47.pth'
 os.makedirs(os.path.dirname(dest), exist_ok=True)
 shutil.copy2(path, dest)
