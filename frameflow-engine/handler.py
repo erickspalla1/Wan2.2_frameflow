@@ -761,7 +761,8 @@ def snap_num_frames(n):
 
 
 def download_image(url):
-    return urllib.request.urlopen(url).read()
+    req = urllib.request.Request(url, headers={"User-Agent": "FrameFlow-Engine/1.0"})
+    return urllib.request.urlopen(req).read()
 
 
 def prepare_image_for_resolution(img_bytes, target_w, target_h):
@@ -967,7 +968,7 @@ def warmup_comfyui():
         pass
 
     log.info("Cold start detected — warming up models...")
-    # Minimal workflow: just load the CLIP + VAE to prime VRAM
+    # Minimal workflow with an output node (ComfyUI rejects prompts without outputs)
     warmup_workflow = {
         "w_clip": {
             "inputs": {"clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
@@ -981,6 +982,10 @@ def warmup_comfyui():
         "w_prompt": {
             "inputs": {"text": "warmup", "clip": ["w_clip", 0]},
             "class_type": "CLIPTextEncode", "_meta": {"title": "Warmup Prompt"},
+        },
+        "w_save": {
+            "inputs": {"filename_prefix": "warmup", "images": ["w_prompt", 0]},
+            "class_type": "SaveImage", "_meta": {"title": "Warmup Output"},
         },
     }
     try:

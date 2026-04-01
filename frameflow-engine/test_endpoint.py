@@ -29,11 +29,11 @@ HEADERS = {
 }
 
 # ── Test payload ──────────────────────────────────────────────
-# Public domain test image (Unsplash sneaker photo)
+# Public test image (Wikipedia Commons — no auth required)
 TEST_PAYLOAD = {
     "input": {
-        "first_frame_url": "https://images.unsplash.com/photo-1542291026-7eec264c27ff?w=1280&q=80",
-        "prompt": "sneaker rotating slowly on white background",
+        "first_frame_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/a/a7/Camponotus_flavomarginatus_ant.jpg/1280px-Camponotus_flavomarginatus_ant.jpg",
+        "prompt": "ant walking slowly across a leaf, smooth natural movement",
         "quality": "fast",
     }
 }
