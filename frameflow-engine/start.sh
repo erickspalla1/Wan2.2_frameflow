@@ -19,6 +19,9 @@ fi
 export HF_HOME="/runpod-volume/huggingface_cache"
 mkdir -p "$HF_HOME" 2>/dev/null || true
 
+# Disable hf-xet transfer protocol — causes segfaults on large files (exit code 139)
+export HF_HUB_DISABLE_XET=1
+
 pip3 install --no-cache-dir huggingface_hub 2>/dev/null || echo "WARNING: huggingface_hub install failed"
 
 # ══════════════════════════════════════════════════════════════
@@ -35,12 +38,15 @@ download_model() {
     if [ ! -f "$dest" ]; then
         echo "  Downloading $(basename $dest) from $repo..."
         python3 -c "
+import os
 from huggingface_hub import hf_hub_download
-import shutil, os
 try:
     path = hf_hub_download(repo_id='$repo', filename='$file')
     os.makedirs(os.path.dirname('$dest'), exist_ok=True)
-    shutil.copy2(path, '$dest')
+    # Symlink instead of copy — saves disk space (no duplication)
+    if os.path.exists('$dest'):
+        os.remove('$dest')
+    os.symlink(path, '$dest')
     print('  OK: $(basename $dest)')
 except Exception as e:
     print(f'  ERROR downloading $(basename $dest): {e}')
@@ -99,14 +105,15 @@ mkdir -p "$MODEL_BASE/upscale_models"
 if [ ! -f "$MODEL_BASE/upscale_models/RealESRGAN_x4plus.pth" ]; then
     echo "  Downloading RealESRGAN_x4plus.pth..."
     python3 -c "
+import os
 from huggingface_hub import hf_hub_download
-import shutil, os
 path = hf_hub_download(repo_id='ai-forever/Real-ESRGAN', filename='RealESRGAN_x4.pth')
 dest = '$MODEL_BASE/upscale_models/RealESRGAN_x4plus.pth'
 os.makedirs(os.path.dirname(dest), exist_ok=True)
-shutil.copy2(path, dest)
+if os.path.exists(dest): os.remove(dest)
+os.symlink(path, dest)
 print('  OK: RealESRGAN_x4plus.pth')
-"
+" || echo "  WARNING: Failed to download RealESRGAN — continuing"
 else
     echo "  Found: RealESRGAN_x4plus.pth"
 fi
@@ -118,14 +125,15 @@ if [ ! -f "$RIFE_DIR/rife47.pth" ]; then
     echo "  Downloading rife47.pth..."
     mkdir -p "$RIFE_DIR"
     python3 -c "
+import os
 from huggingface_hub import hf_hub_download
-import shutil, os
 path = hf_hub_download(repo_id='MachineDelusions/RIFE', filename='rife47.pth')
 dest = '$RIFE_DIR/rife47.pth'
 os.makedirs(os.path.dirname(dest), exist_ok=True)
-shutil.copy2(path, dest)
+if os.path.exists(dest): os.remove(dest)
+os.symlink(path, dest)
 print('  OK: rife47.pth')
-"
+" || echo "  WARNING: Failed to download RIFE — continuing"
 else
     echo "  Found: rife47.pth"
 fi
