@@ -1286,6 +1286,55 @@ def inject_upscale(workflow, meta, params):
     return workflow
 
 
+def inject_rife(workflow, meta, params):
+    """Insert dual RIFE VFI (16fps→32fps→64fps) before CreateVideo.
+    Two passes of 2x interpolation in sequence."""
+    if not params.get("frame_interpolation", False):
+        return workflow
+
+    log.info("Injecting RIFE frame interpolation (2x → 4x total)")
+    video_node = meta["create_video"]
+    current_source = workflow[video_node]["inputs"]["images"]
+
+    # First RIFE pass: 16fps → 32fps
+    workflow["rife_pass1"] = {
+        "inputs": {
+            "ckpt_name": "rife47.pth",
+            "clear_cache_after_n_frames": 10,
+            "multiplier": 2,
+            "fast_mode": True,
+            "ensemble": True,
+            "scale_factor": 1,
+            "frames": current_source,
+        },
+        "class_type": "RIFE VFI",
+        "_meta": {"title": "RIFE VFI Pass 1 (16→32fps)"},
+    }
+
+    # Second RIFE pass: 32fps → 64fps
+    workflow["rife_pass2"] = {
+        "inputs": {
+            "ckpt_name": "rife47.pth",
+            "clear_cache_after_n_frames": 10,
+            "multiplier": 2,
+            "fast_mode": True,
+            "ensemble": True,
+            "scale_factor": 1,
+            "frames": ["rife_pass1", 0],
+        },
+        "class_type": "RIFE VFI",
+        "_meta": {"title": "RIFE VFI Pass 2 (32→64fps)"},
+    }
+
+    workflow[video_node]["inputs"]["images"] = ["rife_pass2", 0]
+
+    # Update CreateVideo fps to match interpolated output
+    # Original 16fps × 4x = 64fps source, deliver at 30fps for smooth playback
+    workflow[video_node]["inputs"]["fps"] = 30
+
+    return workflow
+
+
 # ══════════════════════════════════════════════════════════════
 # Workflow Assembly
 # ══════════════════════════════════════════════════════════════
@@ -1332,6 +1381,7 @@ def build_workflow(mode, params):
 
     workflow = inject_ip_adapter(workflow, meta, params)
     workflow = inject_postprocessing(workflow, meta, params)
+    workflow = inject_rife(workflow, meta, params)
     workflow = inject_upscale(workflow, meta, params)
     return workflow
 
@@ -1437,6 +1487,7 @@ def process_single_job(job):
         "camera_motion": job_input.get("camera_motion", "static"),
         "motion_intensity": max(0.0, min(1.0, float(job_input.get("motion_intensity", 0.5)))),
         "overcapture": job_input.get("overcapture", False),
+        "frame_interpolation": job_input.get("frame_interpolation", False),
     }
 
     # ── Intelligence: Quality preset ──

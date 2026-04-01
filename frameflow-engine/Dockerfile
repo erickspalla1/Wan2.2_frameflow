@@ -27,6 +27,7 @@ RUN cd /app/comfyui/custom_nodes && git clone https://github.com/kijai/ComfyUI-W
 RUN cd /app/comfyui/custom_nodes && git clone https://github.com/Jonseed/ComfyUI-Image-Filters.git || true
 RUN cd /app/comfyui/custom_nodes && git clone https://github.com/EllangoK/ComfyUI-post-processing-nodes.git || true
 RUN cd /app/comfyui/custom_nodes && git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git || true
+RUN cd /app/comfyui/custom_nodes && git clone https://github.com/Fannovel16/ComfyUI-Frame-Interpolation.git || true
 
 # Install node dependencies
 RUN cd /app/comfyui/custom_nodes/comfyui_controlnet_aux && pip3 install --no-cache-dir -r requirements.txt || true
@@ -35,6 +36,7 @@ RUN cd /app/comfyui/custom_nodes/ComfyUI-WanVideoWrapper && pip3 install --no-ca
 RUN cd /app/comfyui/custom_nodes/ComfyUI-Image-Filters && pip3 install --no-cache-dir -r requirements.txt || true
 RUN cd /app/comfyui/custom_nodes/ComfyUI-post-processing-nodes && pip3 install --no-cache-dir -r requirements.txt || true
 RUN cd /app/comfyui/custom_nodes/ComfyUI-VideoHelperSuite && pip3 install --no-cache-dir -r requirements.txt || true
+RUN cd /app/comfyui/custom_nodes/ComfyUI-Frame-Interpolation && pip3 install --no-cache-dir -r requirements.txt || true
 
 # Install RunPod SDK + video/image processing
 RUN pip3 install --no-cache-dir runpod requests "imageio[ffmpeg]" Pillow numpy

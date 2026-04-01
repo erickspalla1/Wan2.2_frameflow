@@ -96,6 +96,25 @@ else
     echo "  Found: RealESRGAN_x4plus.pth"
 fi
 
+# ── RIFE frame interpolation model ──
+echo "Checking RIFE model..."
+RIFE_DIR="$MODEL_BASE/rife"
+if [ ! -f "$RIFE_DIR/rife47.pth" ]; then
+    echo "  Downloading rife47.pth..."
+    mkdir -p "$RIFE_DIR"
+    python3 -c "
+from huggingface_hub import hf_hub_download
+import shutil, os
+path = hf_hub_download(repo_id='Fannovel16/RIFE_models', filename='rife47.pth')
+dest = '$RIFE_DIR/rife47.pth'
+os.makedirs(os.path.dirname(dest), exist_ok=True)
+shutil.copy2(path, dest)
+print('  OK: rife47.pth')
+"
+else
+    echo "  Found: rife47.pth"
+fi
+
 # ══════════════════════════════════════════════════════════════
 # Symlink network volume → ComfyUI model directories
 # ══════════════════════════════════════════════════════════════
@@ -106,6 +125,7 @@ mkdir -p "$COMFY_MODELS/clip"
 mkdir -p "$COMFY_MODELS/vae"
 mkdir -p "$COMFY_MODELS/loras"
 mkdir -p "$COMFY_MODELS/upscale_models"
+mkdir -p "$COMFY_MODELS/rife"
 
 # Symlink individual files (not directories) for ComfyUI discovery
 for f in "$MODEL_BASE/diffusion_models"/*.safetensors; do
@@ -122,6 +142,9 @@ for f in "$MODEL_BASE/loras"/*.safetensors; do
 done
 for f in "$MODEL_BASE/upscale_models"/*.pth; do
     [ -f "$f" ] && ln -sf "$f" "$COMFY_MODELS/upscale_models/$(basename $f)" 2>/dev/null || true
+done
+for f in "$MODEL_BASE/rife"/*.pth; do
+    [ -f "$f" ] && ln -sf "$f" "$COMFY_MODELS/rife/$(basename $f)" 2>/dev/null || true
 done
 
 echo "Model symlinks ready."
